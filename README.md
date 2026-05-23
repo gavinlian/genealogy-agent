@@ -51,3 +51,24 @@ npm run build
 ## License
 
 MIT
+
+## Git 与远程仓库
+
+本目录为**独立仓库**（`main` 分支），与 [gavinlian/resee](https://github.com/gavinlian/resee)（uni-app 云端版，`e:\resee\uiapp`）分开管理。
+
+**不会提交到 Git 的内容**：`node_modules/`、`dist/`、`backend/genealogy.db`、`.env`、`backend/uploads/` 内实际上传文件。
+
+首次推送到 GitHub（在网页新建空仓库 `genealogy-agent` 后）：
+
+```bash
+git remote add origin git@github.com:gavinlian/genealogy-agent.git
+git push -u origin main
+```
+
+日常提交：
+
+```bash
+git add -A
+git status   # 确认无 .env / .db
+git commit -m "feat: 简述改动"
+```

@@ -17,7 +17,8 @@ htmlcov/
 .coverage
 
 # 本地数据与密钥（勿提交）
-backend/uploads/
+backend/uploads/*
+!backend/uploads/.gitkeep
 backend/genealogy.db
 backend/genealogy.db-*
 backend/*.db
