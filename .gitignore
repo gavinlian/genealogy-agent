@@ -1,0 +1,43 @@
+# 依赖与构建
+node_modules/
+dist/
+build/
+*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
+# 本地数据与密钥（勿提交）
+backend/uploads/
+backend/genealogy.db
+backend/genealogy.db-*
+backend/*.db
+backend/*.db-journal
+backend/*.db-wal
+backend/*.db-shm
+.env
+.env.*
+!.env.example
+**/credentials.json
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# 日志与临时文件
+*.log
+*.tmp
+.cache/
