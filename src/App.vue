@@ -1418,9 +1418,12 @@ function relationTypeLabel(t: string, subtype?: string) {
   return base
 }
 
-// ==================== API 璇锋眰 ====================
+// ==================== API 请求 ====================
 
-async function api(method: string, path: string, data?: any, timeoutMs = 15000) {
+const API_TIMEOUT = 15000
+const API_TIMEOUT_LONG = 300000 // OCR / 两阶段解析 / AI 整理
+
+async function api(method: string, path: string, data?: any, timeoutMs = API_TIMEOUT) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
@@ -1924,7 +1927,7 @@ async function parseTextContent(text: string) {
   const res = await api('POST', '/ocr/parse', {
     text,
     parse: parseConfig.value,
-  })
+  }, API_TIMEOUT_LONG)
   if (res.success === false) {
     throw new Error(res.error || res.detail || '解析失败')
   }
@@ -2568,10 +2571,10 @@ async function doOCR() {
       image: base64,
       ocr: ocrConfig.value,
       parse: parseConfig.value,
-    })
+    }, API_TIMEOUT_LONG)
 
     if (!res.success) {
-      alert(res.error || '扫描建谱失败')
+      alert(res.error || res.message || '扫描建谱失败')
       return
     }
 
@@ -2622,8 +2625,8 @@ async function doOCR() {
     if (res.warning) {
       alert(res.warning)
     }
-  } catch (err) {
-    alert('识别失败，请确认后端已启动且 API Key 正确')
+  } catch (err: any) {
+    alert(err?.message || '识别失败，请确认后端已启动且 API Key 正确')
   } finally {
     ocrLoading.value = false
   }

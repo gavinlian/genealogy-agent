@@ -2807,11 +2807,38 @@ if os.path.exists(dist_path):
     app.mount("/", StaticFiles(directory=dist_path, html=True), name="static")
 
 if __name__ == "__main__":
+    import subprocess
     import sys
     import uvicorn
+
+    def _find_listening_pid(port: int) -> int | None:
+        try:
+            out = subprocess.check_output(["netstat", "-ano"], text=True, errors="ignore")
+        except Exception:
+            return None
+        for line in out.splitlines():
+            if f":{port}" not in line or "LISTENING" not in line:
+                continue
+            parts = line.split()
+            if not parts:
+                continue
+            try:
+                return int(parts[-1])
+            except ValueError:
+                continue
+        return None
 
     # Windows 下 reload 易残留多进程并锁死 SQLite，默认关闭；需热重载时：set DEV_RELOAD=1
     use_reload = os.environ.get("DEV_RELOAD") == "1" and sys.platform != "win32"
     if sys.platform == "win32" and os.environ.get("DEV_RELOAD") == "1":
         print("提示：Windows 不建议 DEV_RELOAD=1，易导致 8080 多进程与数据库锁死")
-    uvicorn.run("main:app", host="0.0.0.0", port=8080, reload=use_reload)
+
+    port = 8080
+    busy_pid = _find_listening_pid(port)
+    if busy_pid:
+        print(f"错误：端口 {port} 已被占用（PID {busy_pid}，多为之前未退出的 python main.py）")
+        print(f"  结束旧进程：taskkill /PID {busy_pid} /F")
+        print("  然后再运行：python main.py")
+        sys.exit(1)
+
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=use_reload)
