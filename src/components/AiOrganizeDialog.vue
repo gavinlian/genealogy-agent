@@ -49,6 +49,8 @@ const sessionId = ref('')
 const refreshContextNext = ref(true)
 const agentTurnCount = ref(0)
 const agentContextMode = ref<'full' | 'summary'>('full')
+const sourceTruncated = ref(false)
+const lastSourceIncluded = ref(false)
 
 const cleanSlateModel = computed({
   get: () => Boolean(props.cleanSlate),
@@ -192,6 +194,10 @@ function organizePayload(message: string) {
     source_text: includeSource.value && hasSource.value ? sourceTextTrimmed.value : '',
     source_version_id: props.sourceVersionId || undefined,
     session_id: sessionId.value || undefined,
+    session_meta: {
+      turn_count: agentTurnCount.value,
+      context_mode: agentContextMode.value,
+    },
     refresh_context: refreshContextNext.value,
     clean_slate: cleanSlateModel.value,
   }
@@ -202,7 +208,11 @@ function applyAgentMeta(res: any) {
   agentTurnCount.value = res.agent?.turn_count ?? agentTurnCount.value
   agentContextMode.value = res.agent?.context_mode === 'summary' ? 'summary' : 'full'
   refreshContextNext.value = false
-  if (agentTurnCount.value >= 1 && includeSource.value) includeSource.value = false
+  sourceTruncated.value = Boolean(res.source_truncated)
+  lastSourceIncluded.value = Boolean(res.source_included)
+  if (agentTurnCount.value >= 1 && includeSource.value) {
+    includeSource.value = false
+  }
 }
 
 async function clearChatSession() {
@@ -338,6 +348,16 @@ onMounted(() => {
         <span v-if="sourceVersionLabel" class="ai-organize-model">当前原文：{{ sourceVersionLabel }}</span>
         <span v-if="parseModelHint" class="ai-organize-model">关系解析模型：{{ parseModelHint }}</span>
       </p>
+
+      <div v-if="agentContextMode === 'summary' && agentTurnCount > 0" class="ai-organize-context-banner">
+        当前为<strong>摘要模式</strong>：为节省 token，不再附带完整主谱。若需对照原文或全量主谱，请勾选「附带原文」或点「刷新主谱上下文」。
+      </div>
+      <div v-if="sourceTruncated" class="ai-organize-context-banner ai-organize-context-banner--warn">
+        原文超过 12000 字，本轮仅发送前 12000 字。建议分次整理，或先在「原文」抽屉中精简。
+      </div>
+      <div v-if="agentTurnCount >= 1 && !includeSource && hasSource && !lastSourceIncluded" class="ai-organize-context-banner">
+        第 2 轮起默认不附带原文（可在下方重新勾选「附带原文」）。
+      </div>
 
       <div class="ai-organize-chat">
         <div

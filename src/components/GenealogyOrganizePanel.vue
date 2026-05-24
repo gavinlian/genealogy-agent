@@ -29,6 +29,7 @@ const emit = defineEmits<{
   'open-ai-chat': []
   dismiss: []
   'plan-edited': []
+  notify: [message: string, type?: 'success' | 'error' | 'info']
 }>()
 
 const API = '/api'
@@ -40,6 +41,36 @@ const newRelType = ref<'parent_child' | 'spouse'>('parent_child')
 const textPreview = ref('')
 const textPreviewLoading = ref(false)
 const textPreviewLabel = ref('')
+const applyDiagnostics = ref<{
+  unmatched_names?: string[]
+  skipped_relations?: { from: string; to: string; reason: string }[]
+} | null>(null)
+
+function notify(message: string, type: 'success' | 'error' | 'info' = 'info') {
+  emit('notify', message, type)
+}
+
+function formatApplyDiagnostics(applied: Record<string, unknown>) {
+  const diag = applied.diagnostics as {
+    unmatched_names?: string[]
+    skipped_relations?: { from: string; to: string; reason: string }[]
+  } | undefined
+  if (!diag) return ''
+  const parts: string[] = []
+  if (diag.unmatched_names?.length) {
+    parts.push(`未在主谱匹配到的姓名：${diag.unmatched_names.slice(0, 8).join('、')}${diag.unmatched_names.length > 8 ? '…' : ''}`)
+  }
+  const skipped = diag.skipped_relations || []
+  const missing = skipped.filter((r) => r.reason === 'missing_person')
+  const exists = skipped.filter((r) => r.reason === 'already_exists')
+  if (missing.length) {
+    parts.push(`${missing.length} 条关系因姓名未入库被跳过（请检查方案关系中的「父/子」姓名）`)
+  }
+  if (exists.length) {
+    parts.push(`${exists.length} 条关系已存在，未重复写入`)
+  }
+  return parts.join('；')
+}
 
 const isEmptyGenealogy = computed(() => props.memberCount <= 0)
 
@@ -94,6 +125,7 @@ async function loadTextPreview() {
     if (res.success === false) {
       textPreview.value = ''
       textPreviewLabel.value = ''
+      notify(res.error || res.message || '文字版预览失败', 'error')
       return
     }
     textPreview.value = res.relation_text || ''
@@ -149,11 +181,11 @@ function applyModeSummary() {
 async function clearGenealogy(scope: 'all' | 'branch') {
   if (clearing.value || applying.value) return
   if (scope === 'all' && props.memberCount <= 0) {
-    alert('当前主谱尚无成员')
+    notify('当前主谱尚无成员', 'info')
     return
   }
   if (scope === 'branch' && !props.selectedPersonId) {
-    alert('请先在左侧世代导航选中要清空的分支根节点')
+    notify('请先在左侧世代导航选中要清空的分支根节点', 'info')
     return
   }
 
@@ -170,12 +202,12 @@ async function clearGenealogy(scope: 'all' | 'branch') {
       root_person_id: scope === 'branch' ? props.selectedPersonId : undefined,
     })
     if (!res.success) {
-      alert(res.error || res.detail || '清空失败')
+      notify(res.error || res.detail || '清空失败', 'error')
       return
     }
     emit('cleared')
   } catch {
-    alert('清空失败，请确认后端已启动')
+    notify('清空失败，请确认后端已启动', 'error')
   } finally {
     clearing.value = false
   }
@@ -203,6 +235,7 @@ async function applyPlan(skipReplaceConfirm = false) {
     if (!ok) return
   }
   applying.value = true
+  applyDiagnostics.value = null
   try {
     const res = await api('POST', `/families/${props.familyId}/ai-organize`, {
       persist: true,
@@ -211,22 +244,26 @@ async function applyPlan(skipReplaceConfirm = false) {
       diff: props.diff,
     })
     if (!res.success) {
-      alert(res.error || res.detail || '应用失败')
+      notify(res.error || res.detail || res.message || '应用失败', 'error')
       return
     }
     const applied = res.applied || {}
     const wrote = (applied.persons_added || 0) + (applied.relations_added || 0) + (applied.persons_updated || 0)
+    const diagMsg = formatApplyDiagnostics(applied as Record<string, unknown>)
+    if (applied.diagnostics) {
+      applyDiagnostics.value = applied.diagnostics as typeof applyDiagnostics.value
+    }
     if (wrote <= 0 && planHasChanges(props.plan)) {
-      alert(
-        '未能写入主谱：方案中的姓名可能与主谱不一致，或关系已存在。\n'
-        + '请检查「方案关系」中的姓名，或先在上方文字版中校对后再应用。',
+      notify(
+        diagMsg || '未能写入主谱：请检查「方案关系」中的姓名是否与主谱一致，或先删除误增成员后再应用',
+        'error',
       )
       return
     }
     emit('dismiss')
     emit('applied', applied)
   } catch {
-    alert('应用失败')
+    notify('应用失败，请确认后端已启动', 'error')
   } finally {
     applying.value = false
   }
@@ -295,9 +332,54 @@ async function applyPlan(skipReplaceConfirm = false) {
         主谱为空，可直接将 AI 方案写入主谱（推荐「替换写入」）。
       </div>
 
+      <div v-if="plan?.clean_slate && applyMode === 'merge' && memberCount > 0" class="organize-empty-hint organize-empty-hint--warn">
+        本方案含「干净整理」标记，但您选择了<strong>插入合并</strong>：不会删除已有成员，仅新增/补全关系与字段。
+        若要按方案替换整谱，请改用「替换写入主谱」。
+      </div>
+
       <div v-if="suspiciousDuplicateAdd" class="organize-empty-hint organize-empty-hint--warn">
         检测到将新增 {{ diff?.persons_to_add?.length }} 人（主谱现有 {{ memberCount }} 人），可能是 AI 重复列出了已有成员。
         请在下方案例中删除多余「新增成员」，或改用「替换写入主谱」。
+      </div>
+
+      <div v-if="memberCount > 0 && planHasChanges(plan)" class="ai-organize-apply-mode">
+        <span class="ai-organize-apply-mode-label">应用方式</span>
+        <label class="ai-organize-mode-option ai-organize-mode-option--recommended">
+          <input v-model="applyModeModel" type="radio" value="merge" />
+          增量合并（插入到现有主谱）
+        </label>
+        <label class="ai-organize-mode-option">
+          <input v-model="applyModeModel" type="radio" value="replace" />
+          干净替换（替换写入主谱）
+        </label>
+        <p v-if="applyMode === 'replace' && (plan?.clean_slate || diff?.clean_slate)" class="hint ai-organize-mode-hint ai-organize-mode-hint--warn">
+          干净替换：会移除未出现在方案中的旧关系与多余成员。
+        </p>
+        <p v-else-if="(plan?.clean_slate || diff?.clean_slate) && applyMode === 'merge'" class="hint ai-organize-mode-hint">
+          插入合并：保留已有成员，从文字版补全生卒/简介并新增关系。
+        </p>
+        <p v-else class="hint ai-organize-mode-hint">{{ applyModeSummary() }}</p>
+      </div>
+
+      <div class="organize-apply-primary">
+        <button
+          type="button"
+          class="btn-primary btn-sm"
+          :disabled="applying"
+          @click="applyPlan()"
+        >
+          {{ applying ? '写入中…' : applyMode === 'replace' ? '应用到主谱（替换写入）' : '应用到主谱（插入合并）' }}
+        </button>
+      </div>
+
+      <div v-if="applyDiagnostics && (applyDiagnostics.unmatched_names?.length || applyDiagnostics.skipped_relations?.length)" class="organize-empty-hint organize-empty-hint--warn">
+        <strong>上次应用未完全写入：</strong>
+        <span v-if="applyDiagnostics.unmatched_names?.length">
+          未匹配姓名 {{ applyDiagnostics.unmatched_names.join('、') }}
+        </span>
+        <span v-if="applyDiagnostics.skipped_relations?.length">
+          ；跳过关系 {{ applyDiagnostics.skipped_relations.length }} 条
+        </span>
       </div>
 
       <div class="organize-quick-apply">
@@ -423,21 +505,6 @@ async function applyPlan(skipReplaceConfirm = false) {
         </ul>
       </details>
 
-      <div v-if="diff?.has_replace_impact || plan?.clean_slate" class="ai-organize-apply-mode">
-        <span class="ai-organize-apply-mode-label">应用方式</span>
-        <label class="ai-organize-mode-option">
-          <input v-model="applyModeModel" type="radio" value="merge" :disabled="Boolean(plan?.clean_slate || diff?.clean_slate)" />
-          增量合并
-        </label>
-        <label class="ai-organize-mode-option ai-organize-mode-option--recommended">
-          <input v-model="applyModeModel" type="radio" value="replace" />
-          干净替换（推荐）
-        </label>
-        <p v-if="plan?.clean_slate || diff?.clean_slate" class="hint ai-organize-mode-hint ai-organize-mode-hint--warn">
-          干净整理：会移除未出现在方案中的旧关系与多余成员。
-        </p>
-        <p v-else class="hint ai-organize-mode-hint">{{ applyModeSummary() }}</p>
-      </div>
     </div>
   </div>
 </template>
