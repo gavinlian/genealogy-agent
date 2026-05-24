@@ -171,6 +171,9 @@
             <button class="btn-xs" :disabled="!ocrEditableText.trim()" @click="saveFamilySourceText">
               保存原文
             </button>
+            <button class="btn-xs btn-primary" :disabled="syncPersonDetailsLoading || !persons.length || !activeSourceText.trim()" @click="syncPersonDetailsFromSource">
+              {{ syncPersonDetailsLoading ? '补全中…' : '从文字版补全成员资料' }}
+            </button>
             <button class="btn-xs btn-primary" :disabled="ocrReparsing || !ocrEditableText.trim()" @click="applyTextParseToFamily">
               {{ ocrReparsing ? '两阶段解析中…' : '两阶段解析并对比差异' }}
             </button>
@@ -528,7 +531,7 @@
                 v-if="!displayPerson.biography && !displayPerson.birth_year && !displayPerson.death_year && !selectedPersonSourceExcerpt"
                 class="hint detail-no-meta-hint"
               >
-                结构化字段尚空。请确认「原文」版本已保存；应用 AI 方案或 OCR 入库时会从文字版补全。
+                结构化字段尚空。请先在上方保存文字版，再点「从文字版补全成员资料」；或使用「快速整理」一并补关系与资料。
               </p>
               <div v-if="parentName(displayPerson.parent_id)" class="detail-field">
                 <label>父母</label>
@@ -1063,6 +1066,7 @@
       :compare="sourceCompareData"
       :mode="sourceCompareMode"
       :relations-to-add="rebuildRelationsToAdd"
+      :person-details-to-add="rebuildPersonDetailsToAdd"
       :persons-to-add="parseImportPersonsToAdd"
       @close="closeSourceCompare"
       @apply="applyFromSourceCompare"
@@ -1333,6 +1337,8 @@ const showSourceCompare = ref(false)
 const sourceCompareMode = ref<'source' | 'parse'>('source')
 const sourceCompareData = ref<SourceCompareData | null>(null)
 const rebuildRelationsToAdd = ref(0)
+const rebuildPersonDetailsToAdd = ref(0)
+const syncPersonDetailsLoading = ref(false)
 const parseImportPersonsToAdd = ref(0)
 const pendingParseImport = ref<{ familyId: string; persons: any[]; relations: any[] } | null>(null)
 
@@ -1878,6 +1884,7 @@ async function viewFamily(id: string) {
     selectedPersonId.value = persons.value[0].id
   }
   await fetchSourceVersions()
+  await syncPersonDetailsFromSourceQuiet()
   await loadOrganizeState(id)
   if (currentFamily.value.source_text || sourceVersions.value.length) {
     showTextImportDrawer.value = true
@@ -2059,6 +2066,7 @@ async function saveFamilySourceText() {
     ocrParsedBaseline.value = ocrEditableText.value
     familySourceDirty.value = false
     showToast('原文已保存', 'success')
+    await syncPersonDetailsFromSourceQuiet()
   } else {
     showToast(res.message || res.detail || '保存失败', 'error')
   }
@@ -2482,8 +2490,57 @@ async function doSearch() {
 }
 
 async function viewPersonDetail(p: any) {
-  const res = await api('GET', `/persons/${p.id}`)
+  const q = currentSourceVersionId.value ? `?source_version_id=${encodeURIComponent(currentSourceVersionId.value)}` : ''
+  const res = await api('GET', `/persons/${p.id}${q}`)
   if (res.success) personDetail.value = res
+}
+
+async function syncPersonDetailsFromSourceQuiet() {
+  if (!currentFamily.value?.id || syncPersonDetailsLoading.value) return
+  if (!activeSourceText.value?.trim()) return
+  try {
+    const res = await api('POST', `/families/${currentFamily.value.id}/sync-person-details`, {
+      source_version_id: currentSourceVersionId.value || undefined,
+    })
+    if (res.success && (res.persons_updated ?? 0) > 0) {
+      await fetchPersons()
+      if (selectedPersonId.value) {
+        const p = persons.value.find((x) => x.id === selectedPersonId.value)
+        if (p) await viewPersonDetail(p)
+      }
+    }
+  } catch {
+    /* ignore background sync */
+  }
+}
+
+async function syncPersonDetailsFromSource() {
+  if (!currentFamily.value?.id || syncPersonDetailsLoading.value) return
+  if (!activeSourceText.value.trim()) {
+    showToast('请先保存文字版原文', 'info')
+    return
+  }
+  syncPersonDetailsLoading.value = true
+  try {
+    const res = await api('POST', `/families/${currentFamily.value.id}/sync-person-details`, {
+      source_version_id: currentSourceVersionId.value || undefined,
+    })
+    if (!res.success) {
+      showToast(res.error || res.detail || '补全失败', 'error')
+      return
+    }
+    const n = res.persons_updated ?? 0
+    showToast(n > 0 ? `已从文字版补全 ${n} 名成员资料` : '未发现可补全的空字段（姓名需与文字版一致）', n > 0 ? 'success' : 'info')
+    await fetchPersons()
+    if (selectedPersonId.value) {
+      const p = persons.value.find((x) => x.id === selectedPersonId.value)
+      if (p) await viewPersonDetail(p)
+    }
+  } catch {
+    showToast('补全失败，请确认后端已启动', 'error')
+  } finally {
+    syncPersonDetailsLoading.value = false
+  }
 }
 
 function exportPDF() {
@@ -2569,12 +2626,13 @@ async function addKinship(anchor: any, kinship: string) {
 }
 
 function editPerson(p: any) {
-  editingPerson.value = p
+  const latest = persons.value.find((x) => x.id === p.id) || p
+  editingPerson.value = latest
   personForm.value = {
-    ...p,
-    parent_id: p.parent_id || '',
-    spouse_id: p.spouse_id || '',
-    review_status: p.review_status || 'confirmed',
+    ...latest,
+    parent_id: latest.parent_id || '',
+    spouse_id: latest.spouse_id || '',
+    review_status: latest.review_status || 'confirmed',
   }
   showPersonModal.value = true
 }
@@ -3090,6 +3148,8 @@ async function rebuildFamily() {
     sourceCompareData.value = compare
     rebuildRelationsToAdd.value =
       res.rebuild?.relations_added ?? compare?.proposed_relations?.length ?? 0
+    rebuildPersonDetailsToAdd.value =
+      res.rebuild?.person_details_to_update ?? res.person_detail_patches?.length ?? 0
     showSourceCompare.value = true
   } catch {
     alert('整理失败，请确认后端已启动')
@@ -3157,26 +3217,34 @@ async function applyParseImportFromCompare() {
 }
 
 async function applyRebuildFromCompare() {
-  if (!currentFamily.value?.id || rebuildRelationsToAdd.value <= 0) return
+  if (!currentFamily.value?.id) return
+  if (rebuildRelationsToAdd.value <= 0 && rebuildPersonDetailsToAdd.value <= 0) return
   showSourceCompare.value = false
   buildLoading.value = true
   buildStats.value = null
   try {
-    const res = await api('POST', `/families/${currentFamily.value.id}/rebuild`, {})
+    const res = await api('POST', `/families/${currentFamily.value.id}/rebuild`, {
+      source_version_id: currentSourceVersionId.value || undefined,
+    })
     if (!res.success) {
       alert(res.error || '整理失败')
       return
     }
     buildStats.value = res.stats
     const added = res.rebuild?.relations_added ?? 0
-    if (added > 0) {
-      showToast(`已补全 ${added} 条关系`, 'success')
+    const updated = res.rebuild?.persons_updated ?? 0
+    if (added > 0 || updated > 0) {
+      showToast(`已补全 ${added} 条关系、${updated} 名成员资料`, 'success')
     } else {
-      showToast('未发现可补全的关系', 'success')
+      showToast('未发现可补全项', 'info')
     }
     await fetchPersons()
     await fetchRelations()
     await loadTree()
+    if (selectedPersonId.value) {
+      const p = persons.value.find((x) => x.id === selectedPersonId.value)
+      if (p) await viewPersonDetail(p)
+    }
   } catch {
     alert('整理失败，请确认后端已启动')
   } finally {

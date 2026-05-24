@@ -250,20 +250,21 @@ def enrich_plan_persons_from_source(
     existing_persons: list[dict] | None = None,
 ) -> dict[str, Any]:
     """从族谱原文/文字版解析结果，补全方案中人物的生卒、字辈、简介等字段。"""
+    from .source_person_sync import build_source_person_index, lookup_source_profile
+
     text = (source_text or "").strip()
     if not text or not plan:
         return plan
 
-    parsed = parse_genealogy_text_enhanced(text)
-    by_name: dict[str, dict] = {}
-    for p in parsed.get("persons") or []:
-        name = (p.get("name") or "").strip()
-        if name:
-            by_name[name] = p
+    parsed_index = build_source_person_index(text)
+    by_name: dict[str, dict] = parsed_index
 
     def _merge_fields(target: dict) -> None:
         name = (target.get("name") or "").strip()
-        src = by_name.get(name)
+        if not name:
+            return
+        _, norm_to_canonical, _ = build_genealogy_name_index(existing_persons or [])
+        src = lookup_source_profile(name, by_name, norm_to_canonical)
         if not src:
             return
         for key in PERSON_DETAIL_FIELDS:
@@ -271,7 +272,9 @@ def enrich_plan_persons_from_source(
                 continue
             if (target.get(key) is None or target.get(key) == "" or target.get(key) == "unknown") and src.get(key) not in (None, "", "unknown"):
                 target[key] = src[key]
-        if not target.get("biography"):
+        if not target.get("biography") and src.get("biography"):
+            target["biography"] = src["biography"]
+        elif not target.get("biography"):
             line_hits = [ln.strip() for ln in text.splitlines() if name in ln and ln.strip()]
             if line_hits:
                 target["biography"] = "；".join(line_hits[:3])[:500]
@@ -282,6 +285,7 @@ def enrich_plan_persons_from_source(
         _merge_fields(upd)
 
     if existing_persons:
+        _, norm_to_canonical, _ = build_genealogy_name_index(existing_persons)
         updates_by_name = {
             (u.get("name") or "").strip(): u
             for u in plan.get("person_updates") or []
@@ -294,7 +298,10 @@ def enrich_plan_persons_from_source(
         }
         for person in existing_persons:
             name = (person.get("name") or "").strip()
-            if not name or name in new_names or name not in by_name:
+            if not name or name in new_names:
+                continue
+            src = lookup_source_profile(name, by_name, norm_to_canonical)
+            if not src:
                 continue
             patch = updates_by_name.get(name) or {"name": name}
             if name not in updates_by_name:
@@ -304,14 +311,12 @@ def enrich_plan_persons_from_source(
                 if key == "parent_name":
                     continue
                 cur = person.get(key)
-                src_val = by_name[name].get(key)
+                src_val = src.get(key)
                 if (cur is None or cur == "" or cur == "unknown") and src_val not in (None, "", "unknown"):
                     if patch.get(key) in (None, "", "unknown"):
                         patch[key] = src_val
-            if not person.get("biography") and not patch.get("biography"):
-                line_hits = [ln.strip() for ln in text.splitlines() if name in ln and ln.strip()]
-                if line_hits:
-                    patch["biography"] = "；".join(line_hits[:3])[:500]
+            if not person.get("biography") and not patch.get("biography") and src.get("biography"):
+                patch["biography"] = src["biography"]
 
     return plan
 

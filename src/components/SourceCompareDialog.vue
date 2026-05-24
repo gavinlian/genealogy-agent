@@ -30,6 +30,7 @@ const props = defineProps<{
   compare: SourceCompareData | null
   relationsToAdd: number
   personsToAdd?: number
+  personDetailsToAdd?: number
   mode?: 'source' | 'parse'
 }>()
 
@@ -49,8 +50,10 @@ const applyLabel = computed(() => {
     if (p === 0 && r === 0) return '无新增项'
     return `确认加入主谱（+${p} 人、+${r} 关系）`
   }
-  return props.relationsToAdd
-    ? (props.compare?.has_source ? `应用整理（+${props.relationsToAdd} 关系）` : `仍要补全（+${props.relationsToAdd} 关系）`)
+  return props.relationsToAdd || props.personDetailsToAdd
+    ? (props.compare?.has_source
+      ? `应用整理（+${props.relationsToAdd} 关系${props.personDetailsToAdd ? `、+${props.personDetailsToAdd} 人资料` : ''}）`
+      : `仍要补全（+${props.relationsToAdd} 关系${props.personDetailsToAdd ? `、+${props.personDetailsToAdd} 人资料` : ''}）`)
     : (props.compare?.has_source ? '无需补关系' : '无法对比')
 })
 
@@ -60,7 +63,7 @@ const canApply = computed(() => {
     const r = props.relationsToAdd ?? props.compare?.relations_to_add_count ?? 0
     return p > 0 || r > 0
   }
-  return props.relationsToAdd > 0
+  return props.relationsToAdd > 0 || (props.personDetailsToAdd ?? 0) > 0
 })
 
 const versionLabel = computed(() => {

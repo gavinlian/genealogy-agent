@@ -35,6 +35,10 @@ from agent.genealogy_organizer import (
     enrich_plan_persons_from_source,
     extract_person_source_excerpt,
 )
+from agent.source_person_sync import (
+    apply_person_detail_patches,
+    compute_person_detail_patches,
+)
 from ai_organize_store import (
     clear_ai_chat_messages,
     ensure_ai_chat_table,
@@ -1212,7 +1216,7 @@ async def get_persons(family_id: str):
 
 
 @app.get("/api/persons/{person_id}")
-async def get_person_detail(person_id: str):
+async def get_person_detail(person_id: str, source_version_id: str | None = Query(default=None)):
     conn = get_db()
     c = conn.cursor()
     row = c.execute("SELECT * FROM persons WHERE id = ?", (person_id,)).fetchone()
@@ -1222,7 +1226,7 @@ async def get_person_detail(person_id: str):
     person = row_to_person(row)
     fid = person["family_id"]
 
-    source_text, _ = get_active_source_for_family(c, fid)
+    source_text, _ = _resolve_family_source_text(c, fid, source_version_id)
     source_text = (source_text or "").strip()
     if not source_text:
         fr = c.execute("SELECT source_text FROM families WHERE id = ?", (fid,)).fetchone()
@@ -1310,12 +1314,24 @@ async def create_persons_batch(persons_data: dict):
         if merge and name in created_ids:
             pid = created_ids[name]
             c.execute(
-                """UPDATE persons SET gender=?, birth_year=?, death_year=?, generation=?,
-                   generation_name=?, generation_prefix=?, courtesy_name=?, art_name=?,
-                   county=?, town=?, village=?, biography=?, ai_confidence=?, review_status=?
-                   WHERE id=?""",
+                """UPDATE persons SET
+                   gender=COALESCE(?, gender),
+                   birth_year=COALESCE(?, birth_year),
+                   death_year=COALESCE(?, death_year),
+                   generation=COALESCE(?, generation),
+                   generation_name=COALESCE(?, generation_name),
+                   generation_prefix=COALESCE(?, generation_prefix),
+                   courtesy_name=COALESCE(?, courtesy_name),
+                   art_name=COALESCE(?, art_name),
+                   county=COALESCE(?, county),
+                   town=COALESCE(?, town),
+               village=COALESCE(?, village),
+               biography=COALESCE(?, biography),
+               ai_confidence=COALESCE(?, ai_confidence),
+               review_status=COALESCE(?, review_status)
+               WHERE id=?""",
                 (
-                    p.get("gender", "unknown"),
+                    p.get("gender") if p.get("gender") not in (None, "", "unknown") else None,
                     p.get("birth_year"),
                     p.get("death_year"),
                     p.get("generation"),
@@ -1328,7 +1344,7 @@ async def create_persons_batch(persons_data: dict):
                     p.get("village"),
                     p.get("biography"),
                     p.get("ai_confidence"),
-                    p.get("review_status", "pending_review"),
+                    p.get("review_status"),
                     pid,
                 ),
             )
@@ -1437,7 +1453,7 @@ async def preview_parse_import(family_id: str, data: dict):
                 "from": fn,
                 "to": tn,
                 "type": r["relation_type"] or "parent_child",
-                "status": r.get("status") or "confirmed",
+                "status": dict(r).get("status") or "confirmed",
             })
 
     compare = compare_parsed_with_genealogy(
@@ -1445,6 +1461,8 @@ async def preview_parse_import(family_id: str, data: dict):
     )
     return {"success": True, "compare": compare}
 
+
+@app.put("/api/persons/{person_id}")
 async def update_person(person_id: str, person: dict):
     conn = get_db()
     c = conn.cursor()
@@ -1471,9 +1489,10 @@ async def update_person(person_id: str, person: dict):
     )
     apply_person_relations(c, family_id, person_id, person, is_new=False, now=now)
     _persist_family_generations(c, family_id)
+    row = c.execute("SELECT * FROM persons WHERE id = ?", (person_id,)).fetchone()
     conn.commit()
     conn.close()
-    return {"success": True}
+    return {"success": True, "person": row_to_person(row) if row else None}
 
 @app.delete("/api/persons/{person_id}")
 async def delete_person(person_id: str):
@@ -1886,6 +1905,73 @@ async def agent_generate(data: dict):
     return built
 
 
+def _resolve_family_source_text(
+    cursor,
+    family_id: str,
+    source_version_id: str | None = None,
+) -> tuple[str, dict | None]:
+    if source_version_id:
+        version = get_source_version(cursor, family_id, source_version_id)
+        if version and (version.get("source_text") or "").strip():
+            return version["source_text"], version
+    return get_active_source_for_family(cursor, family_id)
+
+
+@app.post("/api/families/{family_id}/sync-person-details")
+async def sync_family_person_details(family_id: str, data: dict | None = None):
+    """从当前原文/文字版向主谱已有成员回填生卒、字号、简介等（仅补空字段）。"""
+    data = data or {}
+    dry_run = bool(data.get("dry_run"))
+    source_version_id = (data.get("source_version_id") or "").strip() or None
+
+    conn = get_db()
+    c = conn.cursor()
+    family_row = c.execute("SELECT id FROM families WHERE id = ?", (family_id,)).fetchone()
+    if not family_row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Family not found")
+
+    persons_rows = c.execute("SELECT * FROM persons WHERE family_id = ?", (family_id,)).fetchall()
+    if not persons_rows:
+        conn.close()
+        return {"success": False, "error": "族谱尚无成员"}
+
+    source_text, source_version = _resolve_family_source_text(c, family_id, source_version_id)
+    if not (source_text or "").strip():
+        conn.close()
+        return {"success": False, "error": "暂无原文或文字版，请先保存原文版本"}
+
+    persons = [row_to_person(r) for r in persons_rows]
+    patches = compute_person_detail_patches(persons, source_text)
+
+    if dry_run:
+        conn.close()
+        return {
+            "success": True,
+            "dry_run": True,
+            "patches_count": len(patches),
+            "patches_preview": [
+                {"name": p.get("name"), "fields": [k for k in p if k not in ("name", "person_id")]}
+                for p in patches[:30]
+            ],
+            "source_version": {
+                "id": source_version.get("id"),
+                "label": source_version.get("label"),
+            } if source_version else None,
+        }
+
+    now = datetime.now().isoformat()
+    stats = apply_person_detail_patches(c, family_id, persons, patches, now)
+    conn.commit()
+    conn.close()
+    return {
+        "success": True,
+        "source_length": len(source_text.strip()),
+        "patches_count": len(patches),
+        **stats,
+    }
+
+
 @app.post("/api/families/{family_id}/rebuild")
 async def rebuild_family_genealogy(family_id: str, data: dict | None = None):
     """对已有族谱重新推理关系并补全入库；dry_run 时仅对比原文差异并预览补全项。"""
@@ -1904,7 +1990,9 @@ async def rebuild_family_genealogy(family_id: str, data: dict | None = None):
     rel_rows = c.execute(
         "SELECT * FROM relations WHERE family_id = ?", (family_id,)
     ).fetchall()
-    source_text, source_version = get_active_source_for_family(c, family_id)
+    source_text, source_version = _resolve_family_source_text(
+        c, family_id, (data.get("source_version_id") or "").strip() or None,
+    )
 
     if not persons_rows:
         conn.close()
@@ -1913,6 +2001,7 @@ async def rebuild_family_genealogy(family_id: str, data: dict | None = None):
     id_to_name = {row["id"]: row["name"] for row in persons_rows}
     persons = [dict(row) for row in persons_rows]
     persons_for_compare = [row_to_person(r) for r in persons_rows]
+    detail_patches = compute_person_detail_patches(persons_for_compare, source_text or "")
     relations = []
     for r in rel_rows:
         fn = id_to_name.get(r["from_person_id"])
@@ -1922,7 +2011,7 @@ async def rebuild_family_genealogy(family_id: str, data: dict | None = None):
                 "from": fn,
                 "to": tn,
                 "type": r["relation_type"] or "parent_child",
-                "status": r.get("status") or "confirmed",
+                "status": dict(r).get("status") or "confirmed",
             })
 
     compare = compare_genealogy_with_source(
@@ -1960,8 +2049,12 @@ async def rebuild_family_genealogy(family_id: str, data: dict | None = None):
             "success": True,
             "dry_run": True,
             "compare": compare,
-            "rebuild": {"relations_added": len(proposed_add)},
+            "rebuild": {
+                "relations_added": len(proposed_add),
+                "person_details_to_update": len(detail_patches),
+            },
             "proposed_relations": proposed_add[:50],
+            "person_detail_patches": detail_patches[:30],
             "stats": built.get("stats"),
         }
 
@@ -2008,10 +2101,17 @@ async def rebuild_family_genealogy(family_id: str, data: dict | None = None):
                 (root_id, now, family_id),
             )
     _persist_family_generations(c, family_id)
+    detail_stats = apply_person_detail_patches(
+        c, family_id, persons_for_compare, detail_patches, now,
+    )
     conn.commit()
     conn.close()
 
-    built["rebuild"] = {"relations_added": added}
+    built["rebuild"] = {
+        "relations_added": added,
+        "persons_updated": detail_stats.get("persons_updated", 0),
+        "fields_updated": detail_stats.get("fields_updated", 0),
+    }
     built["compare"] = compare
     return built
 
@@ -2189,8 +2289,9 @@ def _apply_organize_plan(
     )
 
     for upd in plan.get("person_updates") or []:
-        name = upd.get("name")
-        pid = name_to_id.get(name)
+        raw_name = upd.get("name")
+        resolved_name = resolve_genealogy_name(raw_name or "", norm_to_canonical) or raw_name
+        pid = name_to_id.get(resolved_name) or name_to_id.get(raw_name)
         if not pid:
             continue
         parent_id = name_to_id.get(upd.get("parent_name")) if upd.get("parent_name") else None
@@ -2290,7 +2391,10 @@ def _apply_organize_plan(
             })
             continue
         raw_conf = rel.get("confidence")
-        conf = float(raw_conf) if raw_conf is not None else 0.9
+        try:
+            conf = float(raw_conf) if raw_conf not in (None, "") else 0.9
+        except (TypeError, ValueError):
+            conf = 0.9
         _insert_relation_row(
             cursor, family_id, fn, tn, rtype,
             status=rel.get("status", "confirmed"),
@@ -2471,7 +2575,7 @@ async def refresh_ai_organize_diff(family_id: str, data: dict):
                 "from": fn,
                 "to": tn,
                 "type": r["relation_type"] or "parent_child",
-                "status": r.get("status") or "confirmed",
+                "status": dict(r).get("status") or "confirmed",
             })
 
     plan = reconcile_plan_with_genealogy(plan, persons)

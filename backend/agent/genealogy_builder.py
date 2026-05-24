@@ -51,23 +51,45 @@ def _extract_person_from_line(line: str, default_gen: int) -> list[dict]:
     if not found:
         return found
 
-    birth_m = re.search(r"生[于]?(\d{4})", line)
-    death_m = re.search(r"卒[于]?(\d{4}|今)", line)
+    birth_m = (
+        re.search(r"(?:生[于]?|出生于?)(\d{4})", line)
+        or re.search(r"(\d{4})\s*年[^。\n]{0,8}生", line)
+    )
+    death_m = (
+        re.search(r"卒[于]?(\d{4}|今)", line)
+        or re.search(r"(\d{4})\s*年[^。\n]{0,8}卒", line)
+    )
     death_year = None
     if death_m:
-        death_year = None if death_m.group(1) == "今" else int(death_m.group(1))
-    ziname_m = re.search(r"字\s*([\u4e00-\u9fff]{1,4})", line)
+        token = death_m.group(1)
+        death_year = None if token == "今" else int(token)
+    courtesy_m = re.search(r"字\s*([\u4e00-\u9fff]{1,4})", line)
+    art_m = re.search(r"号\s*([\u4e00-\u9fff]{2,6})", line)
+
+    from .source_person_sync import extract_line_profile_fields
+    line_profile = extract_line_profile_fields(line)
 
     for entry in found:
+        for key, val in line_profile.items():
+            if entry.get(key) in (None, "", "unknown"):
+                entry[key] = val
         if entry.get("_role") == "main":
-            if birth_m:
+            if birth_m and not entry.get("birth_year"):
                 entry["birth_year"] = int(birth_m.group(1))
-            if death_year is not None:
+            if death_year is not None and not entry.get("death_year"):
                 entry["death_year"] = death_year
-            if ziname_m:
-                gn = normalize_person_name(ziname_m.group(1))
-                if gn and gn != entry.get("name") and is_valid_person_name(gn, allow_single_char=True):
-                    entry["generation_name"] = gn
+            if courtesy_m and not entry.get("courtesy_name"):
+                cn = normalize_person_name(courtesy_m.group(1))
+                if cn and cn != entry.get("name") and is_valid_person_name(cn, allow_single_char=True):
+                    entry["courtesy_name"] = cn
+            if art_m and not entry.get("art_name"):
+                an = normalize_person_name(art_m.group(1))
+                if an and is_valid_person_name(an, allow_single_char=True):
+                    entry["art_name"] = an
+            cleaned = line.strip()
+            if len(cleaned) > len(entry.get("name") or "") + 2 and not entry.get("biography"):
+                if any(kw in cleaned for kw in ("生", "卒", "字", "号", "配", "葬")):
+                    entry["biography"] = cleaned[:500]
     return found
 
 
