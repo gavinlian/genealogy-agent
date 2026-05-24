@@ -39,7 +39,13 @@ export function planHasChanges(plan: OrganizePlan | null) {
   return s.addRel + s.removeRel + s.newPerson + s.updatePerson > 0
 }
 
-export function pickDefaultApplyMode(res: { plan?: OrganizePlan | null; diff?: OrganizeDiff | null }) {
+export function pickDefaultApplyMode(
+  res: { plan?: OrganizePlan | null; diff?: OrganizeDiff | null },
+  options?: { memberCount?: number },
+) {
+  if ((options?.memberCount ?? 0) > 0) {
+    return 'merge' as const
+  }
   if (res.plan?.clean_slate || res.diff?.clean_slate || res.diff?.has_replace_impact) {
     return 'replace' as const
   }

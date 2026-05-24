@@ -32,6 +32,8 @@ from agent.genealogy_organizer import (
     reconcile_plan_with_genealogy,
     build_genealogy_name_index,
     resolve_genealogy_name,
+    enrich_plan_persons_from_source,
+    extract_person_source_excerpt,
 )
 from ai_organize_store import (
     clear_ai_chat_messages,
@@ -44,6 +46,7 @@ from agent.organize_session import (
     clear_organize_session,
     create_organize_session,
     get_organize_session,
+    restore_organize_session,
     resolve_context_mode,
     touch_organize_session,
 )
@@ -1219,6 +1222,14 @@ async def get_person_detail(person_id: str):
     person = row_to_person(row)
     fid = person["family_id"]
 
+    source_text, _ = get_active_source_for_family(c, fid)
+    source_text = (source_text or "").strip()
+    if not source_text:
+        fr = c.execute("SELECT source_text FROM families WHERE id = ?", (fid,)).fetchone()
+        if fr:
+            source_text = (fr["source_text"] or "").strip()
+    source_excerpt = extract_person_source_excerpt(source_text, person.get("name") or "")
+
     parents = []
     if person.get("parent_id"):
         pr = c.execute("SELECT * FROM persons WHERE id = ?", (person["parent_id"],)).fetchone()
@@ -1252,6 +1263,7 @@ async def get_person_detail(person_id: str):
         "children": children,
         "spouse": spouse,
         "relations": relations,
+        "source_excerpt": source_excerpt,
     }
 
 
@@ -2029,6 +2041,30 @@ def _fetch_family_relations_named(cursor, family_id: str, persons_rows: list) ->
     return out
 
 
+def _plan_entry_to_person_row(entry: dict, name_to_id: dict | None = None) -> dict:
+    """整理方案中的人物条目 → 可入库的 person dict。"""
+    row = {
+        "name": entry.get("name"),
+        "gender": entry.get("gender", "unknown"),
+        "generation": entry.get("generation"),
+        "birth_year": entry.get("birth_year"),
+        "death_year": entry.get("death_year"),
+        "generation_name": entry.get("generation_name"),
+        "generation_prefix": entry.get("generation_prefix"),
+        "courtesy_name": entry.get("courtesy_name"),
+        "art_name": entry.get("art_name"),
+        "county": entry.get("county"),
+        "town": entry.get("town"),
+        "village": entry.get("village"),
+        "biography": entry.get("biography"),
+        "review_status": entry.get("review_status", "pending_review"),
+    }
+    parent_name = entry.get("parent_name")
+    if parent_name and name_to_id and parent_name in name_to_id:
+        row["parent_id"] = name_to_id[parent_name]
+    return row
+
+
 def _ensure_plan_relation_persons(
     cursor,
     family_id: str,
@@ -2101,22 +2137,49 @@ def _apply_organize_plan(
         "relations_removed": 0,
         "apply_mode": apply_mode,
     }
+    skipped_relations: list[dict] = []
+    unmatched_names: set[str] = set()
 
     for np in plan.get("new_persons") or []:
         name = (np.get("name") or "").strip()
-        if not name or name in name_to_id:
+        if not name:
             continue
-        if resolve_genealogy_name(name, norm_to_canonical) in name_to_id:
+        canonical = resolve_genealogy_name(name, norm_to_canonical)
+        existing_id = name_to_id.get(name) or (name_to_id.get(canonical) if canonical else None)
+        if existing_id:
+            parent_id = name_to_id.get(np.get("parent_name")) if np.get("parent_name") else None
+            cursor.execute(
+                """UPDATE persons SET
+                   generation=COALESCE(?, generation),
+                   gender=COALESCE(?, gender),
+                   parent_id=COALESCE(?, parent_id),
+                   birth_year=COALESCE(?, birth_year),
+                   death_year=COALESCE(?, death_year),
+                   generation_name=COALESCE(?, generation_name),
+                   courtesy_name=COALESCE(?, courtesy_name),
+                   art_name=COALESCE(?, art_name),
+                   biography=COALESCE(?, biography)
+                   WHERE id=?""",
+                (
+                    np.get("generation"),
+                    np.get("gender"),
+                    parent_id,
+                    np.get("birth_year"),
+                    np.get("death_year"),
+                    np.get("generation_name"),
+                    np.get("courtesy_name"),
+                    np.get("art_name"),
+                    np.get("biography"),
+                    existing_id,
+                ),
+            )
+            if cursor.rowcount:
+                stats["persons_updated"] += 1
+            continue
+        if canonical and canonical in name_to_id:
             continue
         pid = str(uuid.uuid4())[:8]
-        person_row = {
-            "name": name,
-            "gender": np.get("gender", "unknown"),
-            "generation": np.get("generation"),
-            "review_status": "pending_review",
-        }
-        if np.get("parent_name") and np["parent_name"] in name_to_id:
-            person_row["parent_id"] = name_to_id[np["parent_name"]]
+        person_row = _plan_entry_to_person_row(np, name_to_id)
         _insert_person_row(cursor, pid, family_id, person_row, now)
         name_to_id[name] = pid
         stats["persons_added"] += 1
@@ -2132,29 +2195,61 @@ def _apply_organize_plan(
             continue
         parent_id = name_to_id.get(upd.get("parent_name")) if upd.get("parent_name") else None
         cursor.execute(
-            """UPDATE persons SET generation=COALESCE(?, generation), gender=COALESCE(?, gender),
-               parent_id=COALESCE(?, parent_id) WHERE id=?""",
-            (upd.get("generation"), upd.get("gender"), parent_id, pid),
+            """UPDATE persons SET
+               generation=COALESCE(?, generation),
+               gender=COALESCE(?, gender),
+               parent_id=COALESCE(?, parent_id),
+               birth_year=COALESCE(?, birth_year),
+               death_year=COALESCE(?, death_year),
+               generation_name=COALESCE(?, generation_name),
+               generation_prefix=COALESCE(?, generation_prefix),
+               courtesy_name=COALESCE(?, courtesy_name),
+               art_name=COALESCE(?, art_name),
+               county=COALESCE(?, county),
+               town=COALESCE(?, town),
+               village=COALESCE(?, village),
+               biography=COALESCE(?, biography)
+               WHERE id=?""",
+            (
+                upd.get("generation"),
+                upd.get("gender"),
+                parent_id,
+                upd.get("birth_year"),
+                upd.get("death_year"),
+                upd.get("generation_name"),
+                upd.get("generation_prefix"),
+                upd.get("courtesy_name"),
+                upd.get("art_name"),
+                upd.get("county"),
+                upd.get("town"),
+                upd.get("village"),
+                upd.get("biography"),
+                pid,
+            ),
         )
         stats["persons_updated"] += 1
 
-    for rem in plan.get("relations_remove") or []:
-        fn_name = resolve_genealogy_name(rem.get("from") or "", norm_to_canonical)
-        tn_name = resolve_genealogy_name(rem.get("to") or "", norm_to_canonical)
-        fn = name_to_id.get(fn_name)
-        tn = name_to_id.get(tn_name)
-        rtype = rem.get("type") or "parent_child"
-        if not fn or not tn:
-            continue
-        cursor.execute(
-            """DELETE FROM relations
-               WHERE family_id=? AND from_person_id=? AND to_person_id=? AND relation_type=?""",
-            (family_id, fn, tn, rtype),
-        )
-        if cursor.rowcount:
-            stats["relations_removed"] += cursor.rowcount
-            if rtype == "parent_child":
-                cursor.execute("UPDATE persons SET parent_id = NULL WHERE id = ? AND parent_id = ?", (tn, fn))
+    if apply_mode == "replace":
+        for rem in plan.get("relations_remove") or []:
+            fn_name = resolve_genealogy_name(rem.get("from") or "", norm_to_canonical)
+            tn_name = resolve_genealogy_name(rem.get("to") or "", norm_to_canonical)
+            fn = name_to_id.get(fn_name)
+            tn = name_to_id.get(tn_name)
+            rtype = rem.get("type") or "parent_child"
+            if not fn or not tn:
+                continue
+            cursor.execute(
+                """DELETE FROM relations
+                   WHERE family_id=? AND from_person_id=? AND to_person_id=? AND relation_type=?""",
+                (family_id, fn, tn, rtype),
+            )
+            if cursor.rowcount:
+                stats["relations_removed"] += cursor.rowcount
+                if rtype == "parent_child":
+                    cursor.execute(
+                        "UPDATE persons SET parent_id = NULL WHERE id = ? AND parent_id = ?",
+                        (tn, fn),
+                    )
 
     existing_rels = cursor.execute(
         "SELECT from_person_id, to_person_id, relation_type FROM relations WHERE family_id = ?",
@@ -2166,15 +2261,33 @@ def _apply_organize_plan(
     }
 
     for rel in plan.get("relations_add") or []:
-        fn_name = resolve_genealogy_name(rel.get("from") or "", norm_to_canonical)
-        tn_name = resolve_genealogy_name(rel.get("to") or "", norm_to_canonical)
+        raw_from = (rel.get("from") or "").strip()
+        raw_to = (rel.get("to") or "").strip()
+        fn_name = resolve_genealogy_name(raw_from, norm_to_canonical)
+        tn_name = resolve_genealogy_name(raw_to, norm_to_canonical)
         fn = name_to_id.get(fn_name)
         tn = name_to_id.get(tn_name)
         rtype = rel.get("type") or "parent_child"
+        if raw_from and not fn:
+            unmatched_names.add(raw_from)
+        if raw_to and not tn:
+            unmatched_names.add(raw_to)
         if not fn or not tn or fn == tn:
+            skipped_relations.append({
+                "from": raw_from,
+                "to": raw_to,
+                "type": rtype,
+                "reason": "missing_person",
+            })
             continue
         key = (fn, tn, rtype)
         if key in existing_keys:
+            skipped_relations.append({
+                "from": raw_from,
+                "to": raw_to,
+                "type": rtype,
+                "reason": "already_exists",
+            })
             continue
         raw_conf = rel.get("confidence")
         conf = float(raw_conf) if raw_conf is not None else 0.9
@@ -2234,6 +2347,11 @@ def _apply_organize_plan(
         )
 
     _persist_family_generations(cursor, family_id)
+    stats["diagnostics"] = {
+        "skipped_relations": skipped_relations[:30],
+        "skipped_relation_count": len(skipped_relations),
+        "unmatched_names": sorted(unmatched_names)[:30],
+    }
     return stats
 
 
@@ -2397,8 +2515,18 @@ async def ai_organize_family(family_id: str, data: dict):
                 _normalize_plan(plan_input),
                 [dict(r) for r in persons_rows],
             )
-            if normalized_plan.get("clean_slate"):
-                apply_mode = "replace"
+            # 插入(merge) 与 替换(replace) 由前端 apply_mode 决定；不因 clean_slate 强制删人
+            source_text, _ = get_active_source_for_family(c, family_id)
+            source_text = (source_text or "").strip()
+            if not source_text:
+                fr = c.execute("SELECT source_text FROM families WHERE id = ?", (family_id,)).fetchone()
+                if fr:
+                    source_text = (fr["source_text"] or "").strip()
+            normalized_plan = enrich_plan_persons_from_source(
+                normalized_plan,
+                source_text,
+                [row_to_person(r) for r in persons_rows],
+            )
             apply_diff = data.get("diff")
             if apply_mode == "replace" and not apply_diff:
                 persons_list = [row_to_person(r) for r in persons_rows]
@@ -2447,6 +2575,16 @@ async def ai_organize_family(family_id: str, data: dict):
         session_id = None
 
     session = get_organize_session(session_id, family_id) if session_id else None
+    if session_id and not session:
+        meta = data.get("session_meta") or {}
+        if not meta.get("turn_count"):
+            conn_meta = get_db()
+            c_meta = conn_meta.cursor()
+            try:
+                meta = get_ai_chat_state(c_meta, family_id).get("session_meta") or meta
+            finally:
+                conn_meta.close()
+        session = restore_organize_session(session_id, family_id, meta)
     if not session:
         session_id = create_organize_session(family_id)
         session = get_organize_session(session_id, family_id)
@@ -2547,6 +2685,7 @@ async def ai_organize_family(family_id: str, data: dict):
         "fallback": result.get("fallback") or "",
         "source_included": bool(source_text),
         "source_length": len(source_text),
+        "source_truncated": bool(result.get("source_truncated")),
         "source_version": {
             "id": source_version.get("id"),
             "label": source_version.get("label"),
@@ -2569,8 +2708,19 @@ async def ai_organize_family(family_id: str, data: dict):
         apply_mode = (data.get("apply_mode") or "merge").strip().lower()
         if apply_mode not in ("merge", "replace"):
             apply_mode = "merge"
+        persist_source, _ = get_active_source_for_family(c, family_id)
+        persist_source = (persist_source or "").strip()
+        if not persist_source:
+            fr = c.execute("SELECT source_text FROM families WHERE id = ?", (family_id,)).fetchone()
+            if fr:
+                persist_source = (fr["source_text"] or "").strip()
+        persist_plan = enrich_plan_persons_from_source(
+            result["plan"],
+            persist_source,
+            [row_to_person(r) for r in persons_rows],
+        )
         apply_stats = _apply_organize_plan(
-            c, family_id, result["plan"],
+            c, family_id, persist_plan,
             [dict(r) for r in persons_rows], now,
             apply_mode=apply_mode,
             diff=result.get("diff"),

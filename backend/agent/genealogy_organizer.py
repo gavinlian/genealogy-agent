@@ -6,11 +6,27 @@ import json
 import re
 from typing import Any, Callable, Awaitable
 
-from .genealogy_builder import auto_build_genealogy
+from .genealogy_builder import auto_build_genealogy, parse_genealogy_text_enhanced
 from .name_extractor import is_valid_person_name, normalize_person_name, refine_persons_list
 from .parser import extract_json_content
 
 AiFn = Callable[[str], Awaitable[tuple[str, str]]]
+
+PERSON_DETAIL_FIELDS = (
+    "birth_year",
+    "death_year",
+    "generation",
+    "generation_name",
+    "generation_prefix",
+    "gender",
+    "courtesy_name",
+    "art_name",
+    "county",
+    "town",
+    "village",
+    "biography",
+    "parent_name",
+)
 
 
 def _compact_persons(persons: list[dict], limit: int = 120) -> list[dict]:
@@ -68,7 +84,8 @@ def build_organize_prompt(
 ) -> str:
     rel_rows = _relations_by_name(persons, relations)
     source = (source_text or "").strip()
-    if len(source) > 12000:
+    source_truncated = len(source) > 12000
+    if source_truncated:
         source = source[:12000] + "\n…（原文已截断，请分次整理或精简后重试）"
 
     bootstrap_hint = ""
@@ -165,6 +182,13 @@ def _coerce_person_entry(item: Any) -> dict | None:
             "gender": item.get("gender", "unknown"),
             "generation": item.get("generation"),
         }
+        for key in PERSON_DETAIL_FIELDS:
+            if key in ("parent_name",):
+                if item.get(key):
+                    out[key] = item[key]
+                continue
+            if item.get(key) is not None and item.get(key) != "":
+                out[key] = item[key]
         if item.get("parent_name"):
             out["parent_name"] = item["parent_name"]
         return out
@@ -218,6 +242,98 @@ def _normalize_plan(raw: dict) -> dict[str, Any]:
         if coerced:
             plan["new_persons"].append(coerced)
     return plan
+
+
+def enrich_plan_persons_from_source(
+    plan: dict[str, Any],
+    source_text: str,
+    existing_persons: list[dict] | None = None,
+) -> dict[str, Any]:
+    """从族谱原文/文字版解析结果，补全方案中人物的生卒、字辈、简介等字段。"""
+    text = (source_text or "").strip()
+    if not text or not plan:
+        return plan
+
+    parsed = parse_genealogy_text_enhanced(text)
+    by_name: dict[str, dict] = {}
+    for p in parsed.get("persons") or []:
+        name = (p.get("name") or "").strip()
+        if name:
+            by_name[name] = p
+
+    def _merge_fields(target: dict) -> None:
+        name = (target.get("name") or "").strip()
+        src = by_name.get(name)
+        if not src:
+            return
+        for key in PERSON_DETAIL_FIELDS:
+            if key == "parent_name":
+                continue
+            if (target.get(key) is None or target.get(key) == "" or target.get(key) == "unknown") and src.get(key) not in (None, "", "unknown"):
+                target[key] = src[key]
+        if not target.get("biography"):
+            line_hits = [ln.strip() for ln in text.splitlines() if name in ln and ln.strip()]
+            if line_hits:
+                target["biography"] = "；".join(line_hits[:3])[:500]
+
+    for np in plan.get("new_persons") or []:
+        _merge_fields(np)
+    for upd in plan.get("person_updates") or []:
+        _merge_fields(upd)
+
+    if existing_persons:
+        updates_by_name = {
+            (u.get("name") or "").strip(): u
+            for u in plan.get("person_updates") or []
+            if (u.get("name") or "").strip()
+        }
+        new_names = {
+            (np.get("name") or "").strip()
+            for np in plan.get("new_persons") or []
+            if (np.get("name") or "").strip()
+        }
+        for person in existing_persons:
+            name = (person.get("name") or "").strip()
+            if not name or name in new_names or name not in by_name:
+                continue
+            patch = updates_by_name.get(name) or {"name": name}
+            if name not in updates_by_name:
+                plan.setdefault("person_updates", []).append(patch)
+                updates_by_name[name] = patch
+            for key in PERSON_DETAIL_FIELDS:
+                if key == "parent_name":
+                    continue
+                cur = person.get(key)
+                src_val = by_name[name].get(key)
+                if (cur is None or cur == "" or cur == "unknown") and src_val not in (None, "", "unknown"):
+                    if patch.get(key) in (None, "", "unknown"):
+                        patch[key] = src_val
+            if not person.get("biography") and not patch.get("biography"):
+                line_hits = [ln.strip() for ln in text.splitlines() if name in ln and ln.strip()]
+                if line_hits:
+                    patch["biography"] = "；".join(line_hits[:3])[:500]
+
+    return plan
+
+
+def extract_person_source_excerpt(source_text: str, name: str, *, max_chars: int = 1200) -> str:
+    """从原文中提取包含该姓名的段落，供详情页展示。"""
+    text = (source_text or "").strip()
+    person_name = (name or "").strip()
+    if not text or not person_name:
+        return ""
+    blocks: list[str] = []
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if person_name not in line:
+            continue
+        start = max(0, i - 1)
+        end = min(len(lines), i + 2)
+        block = "\n".join(ln.strip() for ln in lines[start:end] if ln.strip())
+        if block and block not in blocks:
+            blocks.append(block)
+    out = "\n\n".join(blocks)
+    return out[:max_chars] if len(out) > max_chars else out
 
 
 def _plan_from_parse_shape(raw: dict) -> dict[str, Any]:
@@ -715,6 +831,8 @@ async def organize_genealogy_with_chat(
     if not message:
         return {"success": False, "error": "请输入整理指令"}
 
+    source_truncated = len((source_text or "").strip()) > 12000
+
     prompt_kwargs = {
         "source_text": source_text,
         "history": history,
@@ -804,5 +922,6 @@ async def organize_genealogy_with_chat(
         "preview": built,
         "diff": diff,
         "context_mode": context_mode,
+        "source_truncated": source_truncated,
         "warning": err if not used_ai and err else "",
     }

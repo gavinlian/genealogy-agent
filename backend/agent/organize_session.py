@@ -49,6 +49,26 @@ def create_organize_session(family_id: str) -> str:
     return session_id
 
 
+def restore_organize_session(session_id: str, family_id: str, meta: dict[str, Any] | None = None) -> dict[str, Any]:
+    """后端重启后，用持久化的 session_id + meta 恢复内存会话。"""
+    meta = meta or {}
+    now = datetime.now()
+    session = {
+        "id": session_id,
+        "family_id": family_id,
+        "created_at": meta.get("created_at") or now.isoformat(),
+        "updated_at": now.isoformat(),
+        "turn_count": int(meta.get("turn_count") or 0),
+        "summary": meta.get("summary") or "",
+        "last_explanation": meta.get("last_explanation") or "",
+        "source_included_once": bool(meta.get("source_included_once")),
+        "restored": True,
+    }
+    _sessions[session_id] = session
+    _family_active[family_id] = session_id
+    return session
+
+
 def get_organize_session(session_id: str | None, family_id: str) -> dict[str, Any] | None:
     if not session_id:
         return None

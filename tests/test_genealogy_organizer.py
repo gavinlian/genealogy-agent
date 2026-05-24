@@ -13,6 +13,7 @@ from agent.genealogy_organizer import (
     parse_organize_plan_from_text,
     compute_organize_diff,
     build_organize_prompt,
+    enrich_plan_persons_from_source,
 )
 from agent.parser import extract_json_content
 
@@ -190,3 +191,16 @@ def test_reconcile_plan_does_not_inflate_diff_after_count():
     diff = compute_organize_diff(persons, relations, plan, built)
     assert diff["before"]["person_count"] == 44
     assert diff["after"]["person_count"] <= 45
+
+
+def test_enrich_plan_backfills_existing_person_updates():
+    source = "一世 张三，字子明，生于康熙十年，卒于乾隆五年。\n二世 李四，男。"
+    plan = _normalize_plan({
+        "explanation": "补全",
+        "new_persons": [{"name": "王五"}],
+    })
+    existing = [{"name": "张三", "birth_year": None, "biography": ""}]
+    enriched = enrich_plan_persons_from_source(plan, source, existing)
+    updates = {u["name"]: u for u in enriched.get("person_updates") or []}
+    assert "张三" in updates
+    assert updates["张三"].get("birth_year") or updates["张三"].get("courtesy_name") or updates["张三"].get("biography")

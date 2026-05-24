@@ -91,3 +91,35 @@ def test_mvp_ocr_parse_local(client):
     res = client.post("/api/ocr/parse", json={"text": "张三生1980\n张四男"})
     assert res.status_code == 200
     assert len(res.json()["persons"]) >= 1
+
+
+def test_merge_apply_preserves_existing_with_clean_slate_plan(client):
+    """插入合并时即使方案带 clean_slate、diff 含 extra_persons，也不应删已有成员。"""
+    create = client.post("/api/families", json={"name": "陈氏"})
+    fid = create.json()["id"]
+    client.post("/api/persons", json={"family_id": fid, "name": "陈公", "generation": 1, "gender": "male"})
+    client.post("/api/persons", json={"family_id": fid, "name": "陈甲", "generation": 2, "gender": "male"})
+
+    plan = {
+        "explanation": "补新支",
+        "clean_slate": True,
+        "new_persons": [{"name": "陈乙", "generation": 2, "gender": "male"}],
+        "relations_add": [{"from": "陈公", "to": "陈乙", "type": "parent_child", "status": "confirmed"}],
+    }
+    diff = {
+        "extra_persons": ["陈甲"],
+        "extra_relations": [],
+        "has_replace_impact": True,
+        "clean_slate": True,
+    }
+    res = client.post(f"/api/families/{fid}/ai-organize", json={
+        "persist": True,
+        "plan": plan,
+        "apply_mode": "merge",
+        "diff": diff,
+    })
+    body = res.json()
+    assert body["success"] is True
+    assert body["applied"]["persons_removed"] == 0
+    names = {p["name"] for p in client.get(f"/api/families/{fid}/persons").json()}
+    assert {"陈公", "陈甲", "陈乙"}.issubset(names)

@@ -10,6 +10,7 @@ from agent.organize_session import (
     clear_organize_session,
     create_organize_session,
     get_organize_session,
+    restore_organize_session,
     resolve_context_mode,
     touch_organize_session,
 )
@@ -45,6 +46,16 @@ def test_build_genealogy_summary():
     )
     assert "1 人" in summary
     assert "张三" in summary
+
+
+def test_restore_session_after_memory_loss():
+    family_id = "fam-restore"
+    session_id = "sess-restore01"
+    session = restore_organize_session(session_id, family_id, {"turn_count": 2, "summary": "主谱共 5 人"})
+    assert session["restored"] is True
+    assert session["turn_count"] == 2
+    assert get_organize_session(session_id, family_id) is not None
+    assert resolve_context_mode(session, refresh_context=False) == "summary"
 
 
 def test_clear_session():
