@@ -1,6 +1,8 @@
 """智能体常量与 Provider 元数据"""
 
-AGENT_NAME = "族见族谱智能体"
+AGENT_NAME = "族见 · 身具智能的家族智能体"
+AGENT_TAGLINE = "见家族，见自己"
+AGENT_BRAND = "ReSee"
 AGENT_VERSION = "1.0.0"
 
 SUPPORTED_TASKS = [

@@ -45,6 +45,21 @@ from ai_organize_store import (
     get_ai_chat_state,
     save_ai_chat_state,
 )
+from agent_store import (
+    append_agent_messages,
+    clear_agent_messages,
+    ensure_agent_state_table,
+    get_agent_state,
+    reset_agent_session,
+    save_agent_state,
+)
+from agent.agent_runtime import AgentContext, run_agent_turn
+from agent.llm_agent import LlmAgentDeps, run_agent_turn_hybrid
+from agent.home_agent import run_home_agent_turn
+from agent.home_actions import materialize_home_actions
+from agent.message_parts import build_family_message_parts, build_home_message_parts
+from agent.pending_actions import clear_family_pending, delete_pending_action, get_pending_action
+from agent.tool_executor import apply_pending_action
 from agent.organize_session import (
     clear_family_organize_sessions,
     clear_organize_session,
@@ -308,6 +323,7 @@ def init_db():
     migrate_schema(c)
     ensure_versions_table(c)
     ensure_ai_chat_table(c)
+    ensure_agent_state_table(c)
     c.execute("""CREATE TABLE IF NOT EXISTS ai_settings (
         id TEXT PRIMARY KEY, ocr_provider TEXT, ocr_model TEXT,
         parse_provider TEXT, parse_model TEXT, updated_at TEXT)""")
@@ -747,7 +763,70 @@ async def call_text_model(
     except Exception as e:
         return "", str(e)
 
-# ==================== 族谱 API ====================
+
+async def call_chat_messages(
+    provider_id: str,
+    model: str,
+    messages: list[dict[str, str]],
+    *,
+    api_key_override: str | None = None,
+    api_base_override: str | None = None,
+    group_id_override: str | None = None,
+    max_tokens: int = 2048,
+) -> tuple[str, str]:
+    """多轮对话，messages 含 system/user/assistant。"""
+    api_key, api_base, group_id = resolve_credentials(
+        provider_id,
+        api_key_override=api_key_override,
+        api_base_override=api_base_override,
+        group_id_override=group_id_override,
+    )
+    if not api_key:
+        return "", "未配置 API Key"
+
+    if provider_id == "minimax":
+        mm_messages = []
+        for m in messages:
+            role = m.get("role") or "user"
+            content = m.get("content") or ""
+            if role == "system":
+                mm_messages.append({"role": "system", "name": "system", "content": content})
+            elif role == "assistant":
+                mm_messages.append({"role": "assistant", "name": "assistant", "content": content})
+            else:
+                mm_messages.append({"role": "user", "name": "user", "content": content})
+        return await call_minimax_chat(
+            api_key, group_id, model, mm_messages,
+            endpoint=_minimax_endpoint(api_base),
+            max_tokens=max_tokens,
+        )
+
+    if not api_base:
+        return "", "未配置 API 地址"
+
+    oai_messages = [
+        {"role": m.get("role") or "user", "content": m.get("content") or ""}
+        for m in messages
+    ]
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                f"{api_base.rstrip('/')}/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={"model": model, "messages": oai_messages, "max_tokens": max_tokens},
+            )
+            if resp.status_code == 200:
+                result = resp.json()
+                text = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+                if text:
+                    return text.strip(), ""
+                return "", "模型返回为空"
+            return "", f"对话失败 HTTP {resp.status_code}"
+    except httpx.TimeoutException:
+        return "", "对话请求超时"
+    except Exception as e:
+        return "", str(e)
+
 
 def _insert_person_row(cursor, pid: str, family_id: str, person: dict, now: str) -> None:
     is_placeholder = 1 if person.get("is_placeholder") else 0
@@ -2496,6 +2575,303 @@ async def clear_genealogy(family_id: str, data: dict | None = None):
     conn.commit()
     conn.close()
     return {"success": True, **stats}
+
+
+@app.get("/api/families/{family_id}/agent/state")
+async def get_family_agent_state(family_id: str):
+    conn = get_db()
+    c = conn.cursor()
+    row = c.execute("SELECT id FROM families WHERE id = ?", (family_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Family not found")
+    state = get_agent_state(c, family_id)
+    conn.close()
+    return {"success": True, **state}
+
+
+@app.put("/api/families/{family_id}/agent/state")
+async def put_family_agent_state(family_id: str, data: dict):
+    conn = get_db()
+    c = conn.cursor()
+    row = c.execute("SELECT id FROM families WHERE id = ?", (family_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Family not found")
+    allowed = {"anchor_person_id", "active_tab", "selected_person_id", "messages"}
+    patch = {k: data[k] for k in allowed if k in data}
+    if data.get("clear_messages"):
+        patch["messages"] = []
+    state = save_agent_state(c, family_id, patch)
+    conn.commit()
+    conn.close()
+    return {"success": True, **state}
+
+
+@app.post("/api/families/{family_id}/agent/session/reset")
+async def reset_family_agent_session(family_id: str, data: dict | None = None):
+    """重置 Agent 对话：new=新建会话（新 session_id + 欢迎语），clear=仅清空历史。"""
+    data = data or {}
+    mode = (data.get("mode") or "new").strip().lower()
+
+    conn = get_db()
+    c = conn.cursor()
+    row = c.execute("SELECT id, name FROM families WHERE id = ?", (family_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Family not found")
+
+    clear_family_pending(c, family_id)
+    family_name = dict(row).get("name") or ""
+
+    if mode == "clear":
+        state = clear_agent_messages(c, family_id)
+    else:
+        state = reset_agent_session(c, family_id, family_name=family_name, with_welcome=True)
+
+    conn.commit()
+    conn.close()
+    return {"success": True, "mode": mode, **state}
+
+
+@app.post("/api/families/{family_id}/agent/chat")
+async def family_agent_chat(family_id: str, data: dict):
+    """对话式 Agent：LLM 选工具（可回退规则）→ 回复 + UI 指令 + 待确认卡片。"""
+    message = (data.get("message") or "").strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="请输入消息")
+
+    conn = get_db()
+    c = conn.cursor()
+    family_row = c.execute("SELECT id FROM families WHERE id = ?", (family_id,)).fetchone()
+    if not family_row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Family not found")
+
+    state = get_agent_state(c, family_id)
+    active_tab = (data.get("active_tab") or state.get("active_tab") or "tree").strip()
+    anchor_person_id = data.get("anchor_person_id")
+    if anchor_person_id is None:
+        anchor_person_id = state.get("anchor_person_id")
+    selected_person_id = data.get("selected_person_id")
+    if selected_person_id is None:
+        selected_person_id = state.get("selected_person_id")
+
+    persons_rows = c.execute("SELECT * FROM persons WHERE family_id = ?", (family_id,)).fetchall()
+    rel_rows = c.execute("SELECT * FROM relations WHERE family_id = ?", (family_id,)).fetchall()
+    persons = [row_to_person(r) for r in persons_rows]
+    for p in persons:
+        p["spouse_id"] = get_spouse_id(c, p["id"])
+    relations = [dict(r) for r in rel_rows]
+
+    source_text, _ = get_active_source_for_family(c, family_id)
+    source_text = (source_text or "").strip()
+
+    def excerpt_for(pid: str) -> str:
+        if not source_text:
+            return ""
+        pr = c.execute("SELECT name FROM persons WHERE id = ?", (pid,)).fetchone()
+        if not pr:
+            return ""
+        return extract_person_source_excerpt(source_text, pr["name"]) or ""
+
+    ctx = AgentContext(
+        family_id=family_id,
+        active_tab=active_tab,
+        anchor_person_id=anchor_person_id,
+        selected_person_id=selected_person_id,
+    )
+
+    parse_cfg = load_model_selection()["parse"]
+    parse_provider, parse_model = parse_cfg["provider"], parse_cfg["model"]
+    ai_configured = _is_provider_configured(parse_provider)
+    force_llm = data.get("use_llm")
+    use_llm = ai_configured if force_llm is None else bool(force_llm)
+
+    async def chat_fn(msgs: list[dict[str, str]]):
+        return await call_chat_messages(parse_provider, parse_model, msgs, max_tokens=2048)
+
+    async def ai_fn(prompt: str):
+        return await call_text_model(parse_provider, parse_model, prompt, max_tokens=4096)
+
+    history = state.get("messages") or []
+    deps = LlmAgentDeps(
+        chat_fn=chat_fn,
+        ai_fn=ai_fn,
+        ai_configured=ai_configured,
+        cursor=c,
+        family_id=family_id,
+        source_text=source_text,
+        source_excerpt_fn=excerpt_for,
+        message_history=history,
+    )
+
+    turn = await run_agent_turn_hybrid(
+        message,
+        ctx,
+        persons,
+        relations,
+        use_llm=use_llm,
+        deps=deps,
+        source_excerpt_fn=excerpt_for,
+    )
+
+    confirmation = turn.state_patch.pop("_confirmation", None)
+    used_llm = bool(turn.state_patch.pop("_used_llm", False))
+    llm_error = turn.state_patch.pop("_llm_error", None)
+
+    state_patch = {
+        "active_tab": turn.state_patch.get("active_tab", active_tab),
+        "selected_person_id": turn.state_patch.get("selected_person_id", selected_person_id),
+        "anchor_person_id": anchor_person_id,
+    }
+    save_agent_state(c, family_id, state_patch)
+    extra_meta: dict = {
+        "ui_actions": turn.ui_actions,
+        "tool_calls": turn.tool_calls,
+        "used_llm": used_llm,
+    }
+    if confirmation:
+        extra_meta["confirmation"] = confirmation
+    if llm_error:
+        extra_meta["llm_error"] = llm_error
+
+    message_parts = build_family_message_parts(
+        reply=turn.reply,
+        ui_actions=turn.ui_actions,
+        tool_calls=turn.tool_calls,
+        confirmation=confirmation,
+    )
+    extra_meta["parts"] = message_parts
+
+    append_agent_messages(c, family_id, message, turn.reply, extra_meta=extra_meta)
+    final_state = get_agent_state(c, family_id)
+    conn.commit()
+    conn.close()
+
+    return {
+        "success": True,
+        "reply": turn.reply,
+        "ui_actions": turn.ui_actions,
+        "tool_calls": turn.tool_calls,
+        "message_parts": message_parts,
+        "confirmation": confirmation,
+        "used_llm": used_llm,
+        "llm_error": llm_error,
+        "parse": {"provider": parse_provider, "model": parse_model},
+        "state": final_state,
+    }
+
+
+@app.post("/api/families/{family_id}/agent/confirm")
+async def family_agent_confirm(family_id: str, data: dict):
+    """用户确认/拒绝 Agent 写操作。"""
+    token = (data.get("token") or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="缺少 confirmation token")
+    approved = data.get("approved", True)
+
+    conn = get_db()
+    c = conn.cursor()
+    pending = get_pending_action(c, token, family_id)
+    if not pending:
+        conn.close()
+        raise HTTPException(status_code=404, detail="确认已过期或不存在")
+
+    if not approved:
+        delete_pending_action(c, token, family_id)
+        append_agent_messages(c, family_id, "", "已取消该操作。", extra_meta={"confirmation_cancelled": token})
+        final_state = get_agent_state(c, family_id)
+        conn.commit()
+        conn.close()
+        return {"success": True, "approved": False, "message": "已取消", "state": final_state}
+
+    persons_rows = c.execute("SELECT * FROM persons WHERE family_id = ?", (family_id,)).fetchall()
+    persons = [row_to_person(r) for r in persons_rows]
+    now = datetime.now().isoformat()
+
+    tool_name = pending.get("tool_name")
+    payload = pending.get("payload") or {}
+
+    if tool_name == "propose_organize_plan":
+        plan = payload.get("plan") or {}
+        apply_mode = payload.get("apply_mode") or "merge"
+        rel_rows = c.execute("SELECT * FROM relations WHERE family_id = ?", (family_id,)).fetchall()
+        persons_list = [row_to_person(r) for r in persons_rows]
+        rel_named = [
+            {"from": r["from"], "to": r["to"], "type": r.get("type") or "parent_child"}
+            for r in _fetch_family_relations_named(c, family_id, persons_list)
+        ]
+        diff = compute_organize_diff(persons_list, rel_named, plan, None)
+        apply_stats = _apply_organize_plan(
+            c, family_id, plan, [dict(r) for r in persons_rows], now,
+            apply_mode=apply_mode, diff=diff,
+        )
+        delete_pending_action(c, token, family_id)
+        msg = f"整理方案已应用：+{apply_stats.get('persons_added', 0)} 人，更新 {apply_stats.get('persons_updated', 0)} 人。"
+        append_agent_messages(c, family_id, "", msg, extra_meta={"apply_stats": apply_stats})
+        final_state = get_agent_state(c, family_id)
+        conn.commit()
+        conn.close()
+        return {"success": True, "approved": True, "message": msg, "apply_stats": apply_stats, "state": final_state}
+
+    result = apply_pending_action(c, family_id, pending, persons=persons, now=now)
+    if not result.get("success"):
+        conn.close()
+        raise HTTPException(status_code=400, detail=result.get("error") or "应用失败")
+
+    delete_pending_action(c, token, family_id)
+    msg = result.get("message") or "操作已完成。"
+    append_agent_messages(c, family_id, "", msg, extra_meta={"applied": tool_name})
+    final_state = get_agent_state(c, family_id)
+    conn.commit()
+    conn.close()
+    return {"success": True, "approved": True, "message": msg, "state": final_state, **result}
+
+
+@app.post("/api/agent/home/chat")
+async def agent_home_chat(data: dict):
+    """未选族谱时的全局 Agent 对话（LLM 为主）。"""
+    message = (data.get("message") or "").strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="请输入消息")
+
+    families = data.get("families") or []
+    history = data.get("history") or []
+
+    parse_cfg = load_model_selection()["parse"]
+    parse_provider, parse_model = parse_cfg["provider"], parse_cfg["model"]
+    ai_configured = _is_provider_configured(parse_provider)
+
+    async def chat_fn(msgs: list[dict[str, str]]):
+        return await call_chat_messages(parse_provider, parse_model, msgs, max_tokens=2048)
+
+    turn = await run_home_agent_turn(
+        message, families, chat_fn=chat_fn, history=history,
+    )
+
+    conn = get_db()
+    c = conn.cursor()
+    home_actions = materialize_home_actions(c, turn.home_actions)
+    if home_actions != turn.home_actions:
+        conn.commit()
+    conn.close()
+
+    message_parts = build_home_message_parts(
+        reply=turn.reply,
+        raw_actions=turn.home_actions,
+        materialized_actions=home_actions,
+    )
+
+    return {
+        "success": True,
+        "reply": turn.reply,
+        "home_actions": home_actions,
+        "message_parts": message_parts,
+        "used_llm": turn.used_llm,
+        "llm_error": turn.llm_error,
+        "parse": {"provider": parse_provider, "model": parse_model},
+    }
 
 
 @app.get("/api/families/{family_id}/ai-organize/state")

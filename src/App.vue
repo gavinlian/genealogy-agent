@@ -1,6 +1,6 @@
 <template>
   <div class="app-shell">
-    <header v-if="!showOCR && !currentFamily" class="app-header">
+    <header v-if="!showOCR && workspaceLayout === 'classic' && !currentFamily" class="app-header">
       <div class="header-brand">
         <div class="logo-mark">族</div>
         <div>
@@ -14,40 +14,24 @@
       </div>
     </header>
 
-    <main v-if="!showOCR" class="main" :class="{ 'main--workspace': !!currentFamily }">
-      <!-- 首页：族谱列表 -->
-      <section v-if="!currentFamily" class="section">
-        <div class="section-header">
-          <h2 class="page-title">我的族谱</h2>
-          <button class="btn-primary" @click="showCreateModal = true">+ 新建族谱</button>
-        </div>
+    <main v-if="!showOCR" class="main" :class="{ 'main--workspace': workspaceLayout === 'classic' && !!currentFamily, 'main--agent-chat': workspaceLayout === 'chat' }">
+      <FamilyChatShell
+        v-if="workspaceLayout === 'chat'"
+        :family="currentFamily"
+        :families="families"
+        :families-loading="loading"
+        @select-family="viewFamily"
+        @leave-family="leaveFamilyFromChat"
+        @switch-classic="enterClassicWorkspace"
+        @refresh="onChatShellRefresh"
+        @create-family="showCreateModal = true"
+        @scan="goOCR"
+        @settings="showSettings = true"
+        @delete-family="requestDeleteFamily"
+      />
 
-        <div v-if="loading" class="loading">加载中</div>
-        <div v-else-if="families.length === 0" class="empty-state">
-          <div class="empty-icon">📜</div>
-          <h3>还没有族谱</h3>
-          <p>扫描老族谱照片，或手动创建一本新族谱</p>
-          <button class="btn-scan" @click="goOCR">开始扫描</button>
-          <button class="btn-secondary" style="margin-left:10px" @click="showCreateModal = true">手动创建</button>
-        </div>
-        <div v-else class="family-grid">
-          <article v-for="f in families" :key="f.id" class="family-card">
-            <div class="family-avatar">{{ familyInitial(f) }}</div>
-            <div class="family-info">
-              <h3>{{ f.name }}</h3>
-              <p v-if="f.description">{{ f.description }}</p>
-              <span class="count">{{ f.person_count || 0 }} 位成员</span>
-            </div>
-            <div class="family-actions">
-              <button class="btn-small" @click="viewFamily(f.id)">打开</button>
-              <button class="btn-xs btn-danger" @click="requestDeleteFamily(f)">删除</button>
-            </div>
-          </article>
-        </div>
-      </section>
-
-      <!-- 族谱工作区：顶栏 + 左导航 + 中树图 + 右详情（界面 PRD） -->
-      <section v-if="currentFamily" class="section main--workspace">
+      <!-- 经典编辑（次要） -->
+      <section v-if="currentFamily && workspaceLayout === 'classic'" class="section main--workspace">
         <div class="workspace-toolbar">
           <div class="workspace-toolbar-title">
             <button class="btn-back" @click="leaveFamily">← 返回</button>
@@ -76,6 +60,7 @@
             >
               整理<span v-if="pendingOrganizePlan && planHasChanges(pendingOrganizePlan)" class="toolbar-badge">1</span>
             </button>
+            <button type="button" class="btn-secondary btn-sm" @click="workspaceLayout = 'chat'">对话</button>
             <button type="button" class="btn-secondary btn-sm" @click="openAiOrganize()">AI</button>
             <button
               type="button"
@@ -107,8 +92,9 @@
             <button class="btn-secondary btn-sm" :class="{ 'btn-ghost': !showOrganizeDrawer }" @click="showOrganizeDrawer = !showOrganizeDrawer">
               族谱整理<span v-if="pendingOrganizePlan && planHasChanges(pendingOrganizePlan)" class="toolbar-badge">1</span>
             </button>
+            <button class="btn-secondary btn-sm" @click="workspaceLayout = 'chat'">对话模式</button>
             <button class="btn-secondary btn-sm" @click="openAiOrganize()" title="与 AI 对话，获取关系整理建议">
-              AI 对话
+              AI 整理
             </button>
             <button class="btn-ghost btn-sm" @click="rebuildFamily" :disabled="buildLoading || !persons.length" title="对比原文差异后补全关系">
               {{ buildLoading ? '整理中…' : '快速整理' }}
@@ -385,6 +371,10 @@
               :class="{ panning: isPanning, 'name-drop-target': treeNameDropActive }"
               @wheel.prevent="onTreeWheel"
               @mousedown="onCanvasPanStart"
+              @touchstart="onCanvasTouchStart"
+              @touchmove="onCanvasTouchMove"
+              @touchend="onCanvasTouchEnd"
+              @touchcancel="onCanvasTouchEnd"
               @dragover.prevent="onTreeDragOver"
               @dragleave="onTreeDragLeave"
               @drop="onTreeNameDrop"
@@ -473,6 +463,12 @@
                   </div>
                 </div>
               </div>
+            </div>
+            <p class="canvas-touch-hint">单指拖动 · 双指缩放</p>
+            <div class="canvas-touch-controls">
+              <button type="button" class="canvas-touch-btn" aria-label="放大" @click="zoomIn">+</button>
+              <button type="button" class="canvas-touch-btn canvas-touch-btn--fit" aria-label="适应屏幕" @click="fitTreeToView">⊡</button>
+              <button type="button" class="canvas-touch-btn" aria-label="缩小" @click="zoomOut">−</button>
             </div>
           </div>
 
@@ -1122,6 +1118,7 @@ import { useToast } from './composables/useToast'
 import { buildPersonTree, flattenNavTree, collectAllNavIds } from './utils/treeNav'
 import OcrTextWorkspace from './components/OcrTextWorkspace.vue'
 import AiOrganizeDialog from './components/AiOrganizeDialog.vue'
+import FamilyChatShell from './components/FamilyChatShell.vue'
 import GenealogyOrganizePanel from './components/GenealogyOrganizePanel.vue'
 import SourceCompareDialog, { type SourceCompareData } from './components/SourceCompareDialog.vue'
 import { type OrganizePlan, type OrganizeDiff, planHasChanges, pickDefaultApplyMode } from './types/organize'
@@ -1130,6 +1127,7 @@ import { type NameAnnotation, NAME_DRAG_MIME } from './utils/ocrAnnotations'
 const API = '/api'
 const { toasts, show: showToast } = useToast()
 
+const workspaceLayout = ref<'chat' | 'classic'>('chat')
 const families = ref<any[]>([])
 const currentFamily = ref<any>(null)
 const persons = ref<any[]>([])
@@ -1146,6 +1144,15 @@ const relationLinkFromId = ref<string | null>(null)
 const relationLinkMode = ref(false)
 const isPanning = ref(false)
 const panStart = ref({ x: 0, y: 0, panX: 0, panY: 0 })
+const touchCanvas = ref({
+  mode: 'none' as 'none' | 'pan' | 'pinch',
+  startX: 0,
+  startY: 0,
+  panX: 0,
+  panY: 0,
+  pinchDist: 0,
+  pinchZoom: 100,
+})
 const showSearchDrawer = ref(false)
 const showExportDrawer = ref(false)
 const showRelationsDrawer = ref(false)
@@ -1665,6 +1672,31 @@ function leaveFamily() {
   detailMobileOpen.value = false
 }
 
+function leaveFamilyFromChat() {
+  leaveFamily()
+  workspaceLayout.value = 'chat'
+}
+
+function enterClassicWorkspace(panel?: string) {
+  workspaceLayout.value = 'classic'
+  if (panel === 'organize' || panel === 'diff') {
+    showOrganizeDrawer.value = true
+  }
+  nextTick(() => fitTreeToView())
+}
+
+async function onChatShellRefresh() {
+  await fetchFamilies()
+  if (currentFamily.value?.id) {
+    await fetchPersons()
+    await fetchRelations()
+  }
+}
+
+function isMobileViewport() {
+  return typeof window !== 'undefined' && window.matchMedia('(max-width: 640px)').matches
+}
+
 function closeDetailMobile() {
   detailMobileOpen.value = false
 }
@@ -1806,6 +1838,98 @@ function onCanvasPanEnd() {
   window.removeEventListener('mouseup', onCanvasPanEnd)
 }
 
+function touchPinchDistance(touches: TouchList) {
+  const dx = touches[0].clientX - touches[1].clientX
+  const dy = touches[0].clientY - touches[1].clientY
+  return Math.hypot(dx, dy)
+}
+
+function touchMidpoint(touches: TouchList) {
+  return {
+    x: (touches[0].clientX + touches[1].clientX) / 2,
+    y: (touches[0].clientY + touches[1].clientY) / 2,
+  }
+}
+
+function resetTouchCanvas() {
+  touchCanvas.value = {
+    mode: 'none',
+    startX: 0,
+    startY: 0,
+    panX: 0,
+    panY: 0,
+    pinchDist: 0,
+    pinchZoom: treeZoom.value,
+  }
+  isPanning.value = false
+}
+
+function onCanvasTouchStart(e: TouchEvent) {
+  if (relationLinkMode.value) return
+  if ((e.target as HTMLElement).closest('.tree-node-card')) return
+  if (e.touches.length === 1) {
+    touchCanvas.value = {
+      mode: 'pan',
+      startX: e.touches[0].clientX,
+      startY: e.touches[0].clientY,
+      panX: treePan.value.x,
+      panY: treePan.value.y,
+      pinchDist: 0,
+      pinchZoom: treeZoom.value,
+    }
+    isPanning.value = true
+  } else if (e.touches.length === 2) {
+    touchCanvas.value = {
+      mode: 'pinch',
+      startX: 0,
+      startY: 0,
+      panX: treePan.value.x,
+      panY: treePan.value.y,
+      pinchDist: touchPinchDistance(e.touches),
+      pinchZoom: treeZoom.value,
+    }
+    isPanning.value = false
+  }
+}
+
+function onCanvasTouchMove(e: TouchEvent) {
+  const ts = touchCanvas.value
+  if (ts.mode === 'pan' && e.touches.length === 1) {
+    e.preventDefault()
+    treePan.value = {
+      x: ts.panX + (e.touches[0].clientX - ts.startX),
+      y: ts.panY + (e.touches[0].clientY - ts.startY),
+    }
+    return
+  }
+  if (ts.mode === 'pinch' && e.touches.length === 2 && ts.pinchDist > 0) {
+    e.preventDefault()
+    const dist = touchPinchDistance(e.touches)
+    const mid = touchMidpoint(e.touches)
+    const scale = dist / ts.pinchDist
+    zoomAtPoint(mid.x, mid.y, ts.pinchZoom * scale)
+  }
+}
+
+function onCanvasTouchEnd(e: TouchEvent) {
+  if (e.touches.length === 0) {
+    resetTouchCanvas()
+    return
+  }
+  if (e.touches.length === 1 && touchCanvas.value.mode === 'pinch') {
+    touchCanvas.value = {
+      mode: 'pan',
+      startX: e.touches[0].clientX,
+      startY: e.touches[0].clientY,
+      panX: treePan.value.x,
+      panY: treePan.value.y,
+      pinchDist: 0,
+      pinchZoom: treeZoom.value,
+    }
+    isPanning.value = true
+  }
+}
+
 function openAddPerson() {
   showPersonModal.value = true
   editingPerson.value = null
@@ -1886,9 +2010,14 @@ async function viewFamily(id: string) {
   await fetchSourceVersions()
   await syncPersonDetailsFromSourceQuiet()
   await loadOrganizeState(id)
-  if (currentFamily.value.source_text || sourceVersions.value.length) {
+  if (!isMobileViewport() && (currentFamily.value.source_text || sourceVersions.value.length)) {
     showTextImportDrawer.value = true
+  } else {
+    showTextImportDrawer.value = false
   }
+  workspaceLayout.value = 'chat'
+  await nextTick()
+  fitTreeToView()
 }
 
 function versionOptionLabel(v: { label?: string; version_no?: number; status?: string }) {
@@ -3473,6 +3602,10 @@ async function saveAISettings() {
   alert('AI 配置已保存')
   await fetchAISettings()
 }
+
+watch(showTextImportDrawer, (open) => {
+  if (!open) nextTick(() => fitTreeToView())
+})
 
 onMounted(async () => {
   fetchFamilies()

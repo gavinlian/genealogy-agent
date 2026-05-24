@@ -57,7 +57,7 @@ def test_agent_status_structure():
         ocr_selection={"provider": "minimax", "model": "MiniMax-M2.7"},
         parse_selection={"provider": "minimax", "model": "MiniMax-M2.7"},
     )
-    assert status["name"] == "族见族谱智能体"
+    assert status["name"] == "族见 · 身具智能的家族智能体"
     assert "scan" in status["tasks"]
     assert "generate" in status["tasks"]
     assert status["ai"]["ready"] is False
