@@ -55,11 +55,41 @@
               {{ currentFamily.name }}
               <span v-if="currentFamily.surname" class="surname-tag">{{ currentFamily.surname }}氏</span>
             </h2>
+            <span class="stat-chip stat-chip--inline"><strong>{{ persons.length }}</strong> 人</span>
+            <span v-if="maxGeneration" class="stat-chip stat-chip--inline"><strong>{{ maxGeneration }}</strong> 代</span>
           </div>
-          <div class="workspace-toolbar-actions">
-            <span class="stat-chip"><strong>{{ persons.length }}</strong> 人</span>
-            <span v-if="maxGeneration" class="stat-chip"><strong>{{ maxGeneration }}</strong> 代</span>
-            <span class="toolbar-divider"></span>
+          <div class="toolbar-mobile-quick">
+            <button type="button" class="btn-primary btn-sm" @click="openAddPerson">+ 新增</button>
+            <button
+              type="button"
+              class="btn-secondary btn-sm"
+              :class="{ 'btn-ghost': !showTextImportDrawer }"
+              @click="showTextImportDrawer = !showTextImportDrawer"
+            >
+              原文{{ sourceVersionBadge }}
+            </button>
+            <button
+              type="button"
+              class="btn-secondary btn-sm"
+              :class="{ 'btn-ghost': !showOrganizeDrawer }"
+              @click="showOrganizeDrawer = !showOrganizeDrawer"
+            >
+              整理<span v-if="pendingOrganizePlan && planHasChanges(pendingOrganizePlan)" class="toolbar-badge">1</span>
+            </button>
+            <button type="button" class="btn-secondary btn-sm" @click="openAiOrganize()">AI</button>
+            <button
+              type="button"
+              class="btn-secondary btn-sm"
+              :class="{ 'btn-ghost': !showMobileToolbarMenu }"
+              @click="showMobileToolbarMenu = !showMobileToolbarMenu"
+            >
+              {{ showMobileToolbarMenu ? '收起' : '更多' }}
+            </button>
+          </div>
+          <div class="workspace-toolbar-actions" :class="{ 'toolbar-actions-expanded': showMobileToolbarMenu }">
+            <span class="stat-chip toolbar-stat-desktop"><strong>{{ persons.length }}</strong> 人</span>
+            <span v-if="maxGeneration" class="stat-chip toolbar-stat-desktop"><strong>{{ maxGeneration }}</strong> 代</span>
+            <span class="toolbar-divider toolbar-stat-desktop"></span>
             <button class="btn-primary btn-sm" @click="openAddPerson">+ 新增人物</button>
             <button class="btn-secondary btn-sm" @click="importFile?.click()">导入</button>
             <button class="btn-secondary btn-sm" @click="showExportDrawer = !showExportDrawer">导出</button>
@@ -125,7 +155,7 @@
           </div>
           <p class="hint" style="margin:0 0 8px">
             族谱原文编辑区 — OCR 后为第1版；校对后可「另存为」新版本。两阶段解析后会对比主谱差异，确认后再入库。
-            （{{ selectedPerson ? '挂到「' + selectedPerson.name + '」下' : '未选父节点则作为新成员' }}）
+            （{{ displayPerson ? '挂到「' + displayPerson.name + '」下' : '未选父节点则作为新成员' }}）
           </p>
           <OcrTextWorkspace
             v-model="ocrEditableText"
@@ -230,7 +260,7 @@
           :family-id="currentFamily.id"
           :member-count="persons.length"
           :selected-person-id="selectedPersonId || undefined"
-          :selected-person-name="selectedPerson?.name || ''"
+          :selected-person-name="displayPerson?.name || ''"
           :source-version-id="currentSourceVersionId || undefined"
           :source-version-label="currentSourceVersion?.label || ''"
           v-model:apply-mode="organizeApplyMode"
@@ -243,6 +273,7 @@
           @cleared="onOrganizeCleared"
           @open-ai-chat="openAiOrganize()"
           @dismiss="dismissOrganizePlan"
+          @notify="(msg, type) => showToast(msg, type || 'info')"
         />
 
         <div v-if="showRelationsDrawer" class="workspace-drawer">
@@ -281,9 +312,18 @@
           </div>
         </div>
 
+        <button
+          type="button"
+          class="nav-mobile-toggle"
+          @click="mobileNavOpen = !mobileNavOpen"
+        >
+          {{ mobileNavOpen ? '收起世代导航' : '展开世代导航' }}
+          <span class="nav-mobile-toggle-count">{{ persons.length }} 人</span>
+        </button>
+
         <div class="workspace-body">
           <!-- 左侧树状导航 -->
-          <aside class="workspace-nav">
+          <aside class="workspace-nav" :class="{ 'nav-mobile-open': mobileNavOpen }">
             <div class="workspace-nav-header">世代导航</div>
             <div class="workspace-nav-list">
               <template v-for="item in flatNavItems" :key="item.id">
@@ -295,7 +335,7 @@
                     @click.stop="toggleNavExpand(item.id)"
                   >{{ item.expanded ? '▼' : '▶' }}</button>
                   <span v-else class="nav-tree-toggle placeholder"></span>
-                  <button type="button" class="nav-tree-name" @click="selectPerson(item.id)">{{ item.name }}</button>
+                  <button type="button" class="nav-tree-name" @click="selectPersonFromNav(item.id)">{{ item.name }}</button>
                   <span v-if="item.generation" class="nav-tree-gen">{{ item.generation }}代</span>
                 </div>
               </template>
@@ -306,11 +346,11 @@
           <!-- 中间树状图 -->
           <div class="workspace-canvas">
             <div class="canvas-toolbar">
-              <select v-model="treeStyle" class="input input-inline" @change="loadTree">
+              <select v-model="treeStyle" class="input input-inline canvas-style-select" @change="loadTree">
+                <option value="silkworm">垂丝图（推荐·按世分行）</option>
                 <option value="su">苏式</option>
                 <option value="eu">欧式</option>
                 <option value="tower">宝塔式</option>
-                <option value="silkworm">垂丝图</option>
                 <option value="radial">圆形图谱</option>
               </select>
               <span class="toolbar-divider"></span>
@@ -354,14 +394,32 @@
                   class="tree-view"
                   :class="[
                     'tree-' + treeStyle,
-                    { 'tree-layout-absolute': isAbsoluteTreeLayout, 'tree-compact': treeCompact },
+                    { 'tree-layout-absolute': isAbsoluteTreeLayout, 'tree-compact': treeCompact, 'tree-silkworm-labeled': treeStyle === 'silkworm' },
                   ]"
                   :style="treeViewSizeStyle"
                 >
+                  <template v-if="treeStyle === 'silkworm'">
+                    <div
+                      v-for="row in silkwormGenerationRows"
+                      :key="'band-' + row.generation"
+                      class="tree-gen-row-band"
+                      :class="{ 'tree-gen-row-band--alt': row.even }"
+                      :style="{ top: (row.top - 6) + 'px', height: row.height + 'px' }"
+                    />
+                    <div
+                      v-for="row in silkwormGenerationRows"
+                      :key="'label-' + row.generation"
+                      class="tree-gen-row-label"
+                      :style="{ top: row.top + 'px', height: row.height + 'px' }"
+                    >
+                      <span class="tree-gen-row-title">第{{ row.generation }}世</span>
+                      <span class="tree-gen-row-count">{{ row.count }}人</span>
+                    </div>
+                  </template>
                   <svg
                     v-if="isAbsoluteTreeLayout && treeEdges.length"
                     class="tree-edges-layer"
-                    :width="treeBounds.width"
+                    :width="treeDisplayWidth"
                     :height="treeBounds.height"
                   >
                     <line
@@ -391,6 +449,7 @@
                           'is-placeholder': p.is_placeholder,
                         },
                       ]"
+                      title="单击查看详情，双击聚焦放大"
                       @dblclick.stop="focusPerson(p.id)"
                     >
                       <div class="node-content">
@@ -415,54 +474,72 @@
           </div>
 
           <!-- 右侧详情面板 -->
+          <div
+            v-if="detailMobileOpen"
+            class="detail-mobile-backdrop"
+            @click="closeDetailMobile"
+          ></div>
           <aside class="workspace-detail" :class="{ 'detail-mobile-open': detailMobileOpen }">
             <div class="detail-header">
-              <h3>{{ selectedPerson?.name || '成员详情' }}</h3>
-              <button v-if="selectedPerson" class="btn-primary btn-sm" @click="editPerson(selectedPerson)">编辑</button>
+              <h3>{{ displayPerson?.name || '成员详情' }}</h3>
+              <div class="detail-header-actions">
+                <button v-if="displayPerson" class="btn-primary btn-sm" @click="editPerson(displayPerson)">编辑</button>
+                <button type="button" class="btn-close detail-close-btn" aria-label="关闭详情" @click="closeDetailMobile">×</button>
+              </div>
             </div>
-            <div v-if="!selectedPerson" class="detail-body detail-empty">
-              <p>在左侧导航或中间树图中点击成员，查看详情</p>
-              <p class="hint">双击树节点可聚焦放大</p>
+            <div v-if="!displayPerson" class="detail-body detail-empty">
+              <p>在左侧「世代导航」或中间<strong>垂丝图</strong>中点击成员卡片，查看详情</p>
+              <p class="hint">单击节点查看详情 · 双击节点聚焦 · 左侧导航会同步定位到该行</p>
             </div>
             <div v-else class="detail-body">
               <div class="detail-field">
                 <label>姓名</label>
-                <p>{{ selectedPerson.name }} <span class="gender-tag">{{ genderLabel(selectedPerson.gender) }}</span></p>
+                <p>{{ displayPerson.name }} <span class="gender-tag">{{ genderLabel(displayPerson.gender) }}</span></p>
               </div>
-              <div v-if="selectedPerson.generation" class="detail-field">
+              <div v-if="displayPerson.generation" class="detail-field">
                 <label>世代</label>
-                <p>第 {{ selectedPerson.generation }} 代</p>
+                <p>第 {{ displayPerson.generation }} 世<span v-if="displayPerson.generation_name"> · {{ displayPerson.generation_name }}</span></p>
               </div>
-              <div v-if="selectedPerson.birth_year || selectedPerson.death_year" class="detail-field">
+              <div v-if="displayPerson.birth_year || displayPerson.death_year" class="detail-field">
                 <label>生卒</label>
                 <p>
-                  {{ selectedPerson.birth_year || '?' }}
+                  {{ displayPerson.birth_year || '?' }}
                   –
-                  {{ selectedPerson.death_year || '今' }}
+                  {{ displayPerson.death_year || '今' }}
                 </p>
               </div>
-              <div v-if="selectedPerson.courtesy_name || selectedPerson.art_name" class="detail-field">
+              <div v-if="displayPerson.courtesy_name || displayPerson.art_name" class="detail-field">
                 <label>字 / 号</label>
-                <p>{{ selectedPerson.courtesy_name || '—' }} / {{ selectedPerson.art_name || '—' }}</p>
+                <p>{{ displayPerson.courtesy_name || '—' }} / {{ displayPerson.art_name || '—' }}</p>
               </div>
-              <div v-if="selectedPerson.location_text || selectedPerson.county" class="detail-field">
+              <div v-if="displayPerson.location_text || displayPerson.county" class="detail-field">
                 <label>籍贯</label>
-                <p>{{ selectedPerson.location_text || [selectedPerson.county, selectedPerson.town, selectedPerson.village].filter(Boolean).join(' ') }}</p>
+                <p>{{ displayPerson.location_text || [displayPerson.county, displayPerson.town, displayPerson.village].filter(Boolean).join(' ') }}</p>
               </div>
-              <div v-if="selectedPerson.biography" class="detail-field">
+              <div v-if="displayPerson.biography" class="detail-field">
                 <label>简介</label>
-                <p>{{ selectedPerson.biography }}</p>
+                <p>{{ displayPerson.biography }}</p>
               </div>
-              <div v-if="parentName(selectedPerson.parent_id)" class="detail-field">
+              <div v-if="selectedPersonSourceExcerpt" class="detail-field detail-field--source">
+                <label>原文 / 文字版摘录</label>
+                <pre class="detail-source-excerpt">{{ selectedPersonSourceExcerpt }}</pre>
+              </div>
+              <p
+                v-if="!displayPerson.biography && !displayPerson.birth_year && !displayPerson.death_year && !selectedPersonSourceExcerpt"
+                class="hint detail-no-meta-hint"
+              >
+                结构化字段尚空。请确认「原文」版本已保存；应用 AI 方案或 OCR 入库时会从文字版补全。
+              </p>
+              <div v-if="parentName(displayPerson.parent_id)" class="detail-field">
                 <label>父母</label>
                 <p>
-                  <a href="#" @click.prevent="selectPerson(selectedPerson.parent_id)">{{ parentName(selectedPerson.parent_id) }}</a>
+                  <a href="#" @click.prevent="selectPerson(displayPerson.parent_id)">{{ parentName(displayPerson.parent_id) }}</a>
                 </p>
               </div>
-              <div v-if="spouseName(selectedPerson.spouse_id)" class="detail-field">
+              <div v-if="spouseName(displayPerson.spouse_id)" class="detail-field">
                 <label>配偶</label>
                 <p>
-                  <a href="#" @click.prevent="selectPerson(selectedPerson.spouse_id!)">{{ spouseName(selectedPerson.spouse_id) }}</a>
+                  <a href="#" @click.prevent="selectPerson(displayPerson.spouse_id!)">{{ spouseName(displayPerson.spouse_id) }}</a>
                 </p>
               </div>
               <div class="detail-relations">
@@ -475,10 +552,10 @@
                 <div v-if="!selectedPersonRelations.length" class="hint">暂无关联关系（可点工具栏「连线」在图中建立）</div>
               </div>
               <div style="margin-top:16px;display:flex;gap:8px;flex-wrap:wrap">
-                <button class="btn-xs" @click="addChild(selectedPerson)">+ 子女</button>
-                <button class="btn-xs" @click="addKinship(selectedPerson, '孙')">+ 孙</button>
-                <button class="btn-xs" @click="addKinship(selectedPerson, '曾孙')">+ 曾孙</button>
-                <button class="btn-xs btn-danger" @click="deletePerson(selectedPerson.id)">删除</button>
+                <button class="btn-xs" @click="addChild(displayPerson)">+ 子女</button>
+                <button class="btn-xs" @click="addKinship(displayPerson, '孙')">+ 孙</button>
+                <button class="btn-xs" @click="addKinship(displayPerson, '曾孙')">+ 曾孙</button>
+                <button class="btn-xs btn-danger" @click="deletePerson(displayPerson.id)">删除</button>
               </div>
             </div>
           </aside>
@@ -1071,6 +1148,8 @@ const showRelationsDrawer = ref(false)
 const showOrganizeDrawer = ref(false)
 const showTextImportDrawer = ref(false)
 const detailMobileOpen = ref(false)
+const showMobileToolbarMenu = ref(false)
+const mobileNavOpen = ref(false)
 const personFormErrors = ref<Record<string, string>>({})
 const saveSuccessHint = ref('')
 const deleteFamilyModal = ref(false)
@@ -1221,7 +1300,7 @@ const personForm = ref({
   biography: '', spouse_id: '',
 })
 
-const treeStyle = ref<'su' | 'eu' | 'tower' | 'silkworm' | 'radial'>('su')
+const treeStyle = ref<'su' | 'eu' | 'tower' | 'silkworm' | 'radial'>('silkworm')
 const treeNodes = ref<any[]>([])
 const searchQuery = ref('')
 const searchMode = ref<'keyword' | 'nl'>('keyword')
@@ -1261,12 +1340,58 @@ const isAbsoluteTreeLayout = computed(() =>
   treeStyle.value === 'silkworm' || treeStyle.value === 'radial',
 )
 
+/** 垂丝图左侧「第N世」标签列宽度 */
+const SILKWORM_LABEL_COL = 88
+
+const treeDisplayWidth = computed(() => {
+  const base = treeBounds.value.width || 880
+  return treeStyle.value === 'silkworm' ? base + SILKWORM_LABEL_COL : base
+})
+
+const silkwormGenerationRows = computed(() => {
+  if (treeStyle.value !== 'silkworm' || !treeNodes.value.length) return []
+  const byGen = new Map<number, any[]>()
+  for (const n of treeNodes.value) {
+    const g = Number(n.generation) || 1
+    if (!byGen.has(g)) byGen.set(g, [])
+    byGen.get(g)!.push(n)
+  }
+  const rows: { generation: number; top: number; height: number; count: number; even: boolean }[] = []
+  let idx = 0
+  for (const g of [...byGen.keys()].sort((a, b) => a - b)) {
+    const nodes = byGen.get(g)!
+    const first = nodes.reduce((a, b) =>
+      ((a.layout?.offset_y ?? 0) < (b.layout?.offset_y ?? 0) ? a : b),
+    )
+    const rowY = first.layout?.offset_y ?? 0
+    const rowH = Math.max(
+      first.layout?.node_height || 72,
+      ...nodes.map((n) => n.layout?.node_height || 72),
+    )
+    rows.push({ generation: g, top: rowY, height: rowH + 16, count: nodes.length, even: idx % 2 === 0 })
+    idx += 1
+  }
+  return rows
+})
+
 const navTree = computed(() => buildPersonTree(persons.value))
 const flatNavItems = computed(() => flattenNavTree(navTree.value, expandedNavIds.value))
 
 const selectedPerson = computed(() =>
   persons.value.find((p) => p.id === selectedPersonId.value) || null,
 )
+
+const displayPerson = computed(() => personDetail.value?.person || selectedPerson.value)
+
+const selectedPersonSourceExcerpt = computed(() => {
+  const fromApi = personDetail.value?.source_excerpt
+  if (fromApi) return fromApi
+  const name = displayPerson.value?.name
+  if (!name || !activeSourceText.value) return ''
+  const lines = activeSourceText.value.split('\n')
+  const hits = lines.filter((ln) => ln.includes(name)).slice(0, 5)
+  return hits.join('\n')
+})
 
 const selectedPersonRelations = computed(() => {
   const pid = selectedPersonId.value
@@ -1311,6 +1436,7 @@ const treeNodeById = computed(() => {
 
 const treeEdges = computed(() => {
   if (!isAbsoluteTreeLayout.value) return []
+  const labelOffset = treeStyle.value === 'silkworm' ? SILKWORM_LABEL_COL : 0
   const edges: { x1: number; y1: number; x2: number; y2: number; type: string }[] = []
   for (const r of relations.value) {
     if (r.relation_type !== 'parent_child' && r.relation_type !== 'spouse') continue
@@ -1321,9 +1447,9 @@ const treeEdges = computed(() => {
     const fh = from.layout.node_height || 56
     const tw = to.layout.node_width || 128
     edges.push({
-      x1: from.layout.offset_x + fw / 2,
+      x1: labelOffset + from.layout.offset_x + fw / 2,
       y1: from.layout.offset_y + fh,
-      x2: to.layout.offset_x + tw / 2,
+      x2: labelOffset + to.layout.offset_x + tw / 2,
       y2: to.layout.offset_y,
       type: r.relation_type,
     })
@@ -1528,13 +1654,28 @@ function leaveFamily() {
   showSearchDrawer.value = false
   showExportDrawer.value = false
   showRelationsDrawer.value = false
+  showMobileToolbarMenu.value = false
+  mobileNavOpen.value = false
+  detailMobileOpen.value = false
 }
 
-function selectPerson(id: string) {
+function closeDetailMobile() {
+  detailMobileOpen.value = false
+}
+
+function selectPerson(id: string, opts?: { focusOnTree?: boolean }) {
   selectedPersonId.value = id
   detailMobileOpen.value = true
+  personDetail.value = null
   const p = persons.value.find((x) => x.id === id)
-  if (p) personDetail.value = null
+  if (p) void viewPersonDetail(p)
+  if (opts?.focusOnTree && treeNodeById.value.has(id)) {
+    nextTick(() => focusPerson(id))
+  }
+}
+
+function selectPersonFromNav(id: string) {
+  selectPerson(id, { focusOnTree: true })
 }
 
 function focusPerson(id: string) {
@@ -1619,7 +1760,7 @@ function fitTreeToView() {
   const pad = 28
   const vw = Math.max(vp.clientWidth - pad * 2, 120)
   const vh = Math.max(vp.clientHeight - pad * 2, 120)
-  const bw = treeBounds.value.width || 880
+  const bw = treeDisplayWidth.value
   const bh = treeBounds.value.height || 640
   const scalePct = clampTreeZoom(Math.floor(Math.min(vw / bw, vh / bh) * 100))
   treeZoom.value = scalePct
@@ -2231,7 +2372,7 @@ function computeTreeBoundsLocal() {
     maxY = Math.max(maxY, (l.offset_y || 0) + h)
   }
   treeBounds.value = {
-    width: Math.max(maxX + 64, 480),
+    width: Math.max(maxX + 64 + (treeStyle.value === 'silkworm' ? SILKWORM_LABEL_COL : 0), 480),
     height: Math.max(maxY + 64, 360),
   }
 }
@@ -2239,7 +2380,7 @@ function computeTreeBoundsLocal() {
 const treeViewSizeStyle = computed(() => {
   if (!isAbsoluteTreeLayout.value) return {}
   return {
-    width: `${treeBounds.value.width}px`,
+    width: `${treeDisplayWidth.value}px`,
     height: `${treeBounds.value.height}px`,
   }
 })
@@ -2258,7 +2399,7 @@ function onTreeNodeClick(p: any, e: MouseEvent) {
   if (relationLinkMode.value || e.shiftKey) {
     if (!relationLinkFromId.value) {
       relationLinkFromId.value = p.id
-      selectPerson(p.id)
+      selectPerson(p.id, { focusOnTree: false })
       showToast(`已选「${p.name}」，请点击另一成员建立关系`, 'info')
       return
     }
@@ -2269,7 +2410,7 @@ function onTreeNodeClick(p: any, e: MouseEvent) {
     void promptTreeRelation(relationLinkFromId.value, p.id)
     return
   }
-  selectPerson(p.id)
+  selectPerson(p.id, { focusOnTree: false })
 }
 
 async function promptTreeRelation(fromId: string, toId: string) {
@@ -2300,10 +2441,11 @@ async function promptTreeRelation(fromId: string, toId: string) {
 function treeNodeStyle(p: any) {
   const layout = p.layout || {}
   const nodeW = layout.node_width || (treeCompact.value ? 96 : 128)
+  const labelOffset = treeStyle.value === 'silkworm' ? SILKWORM_LABEL_COL : 0
   if (treeStyle.value === 'silkworm' || treeStyle.value === 'radial') {
     return {
       position: 'absolute',
-      left: (layout.offset_x || 0) + 'px',
+      left: (layout.offset_x || 0) + labelOffset + 'px',
       top: (layout.offset_y || 0) + 'px',
       width: nodeW + 'px',
     }
@@ -2701,7 +2843,7 @@ async function addAnnotatedPersonToFamily(payload: { name: string; source?: stri
     showToast(`「${name}」已在族谱中`, 'info')
     return
   }
-  const parent = selectedPerson.value
+  const parent = displayPerson.value
   const data: Record<string, unknown> = {
     name,
     gender: 'unknown',
@@ -2839,7 +2981,14 @@ async function refreshOrganizeDiff() {
     if (res.success) {
       pendingOrganizePlan.value = res.plan || pendingOrganizePlan.value
       pendingOrganizeDiff.value = res.diff || null
-      if (persons.value.length <= 0) organizeApplyMode.value = 'replace'
+      if (persons.value.length <= 0) {
+        organizeApplyMode.value = 'replace'
+      } else if (organizeApplyMode.value !== 'merge') {
+        organizeApplyMode.value = pickDefaultApplyMode(
+          { plan: pendingOrganizePlan.value, diff: pendingOrganizeDiff.value },
+          { memberCount: persons.value.length },
+        )
+      }
       await saveOrganizeState()
     }
   } catch {
@@ -2862,7 +3011,7 @@ function onAiPlanUpdate(payload: { plan: OrganizePlan | null; diff: OrganizeDiff
   pendingOrganizePlan.value = payload.plan
   pendingOrganizeDiff.value = payload.diff
   if (payload.plan && planHasChanges(payload.plan)) {
-    organizeApplyMode.value = pickDefaultApplyMode(payload)
+    organizeApplyMode.value = pickDefaultApplyMode(payload, { memberCount: persons.value.length })
     showOrganizeDrawer.value = true
     showToast('AI 方案已同步到「族谱整理」面板', 'success')
   }
@@ -2885,11 +3034,23 @@ async function onOrganizeApplied(stats?: Record<string, number>) {
   await loadTree()
   const added = stats?.persons_added ?? 0
   const rels = stats?.relations_added ?? 0
-  const msg = added || rels
+  const diag = stats?.diagnostics as { unmatched_names?: string[]; skipped_relation_count?: number } | undefined
+  let msg = added || rels
     ? `主谱已更新（+${added} 人，+${rels} 关系），可在可视化界面继续微调`
     : '主谱已更新，可在可视化界面继续微调'
+  if (diag?.unmatched_names?.length) {
+    msg += `；未匹配姓名：${diag.unmatched_names.slice(0, 5).join('、')}`
+  } else if (diag?.skipped_relation_count) {
+    msg += `；${diag.skipped_relation_count} 条关系未写入（已存在或姓名未匹配）`
+  }
   showToast(msg, 'success')
 }
+
+watch(showOrganizeDrawer, (open) => {
+  if (open && pendingOrganizePlan.value && planHasChanges(pendingOrganizePlan.value)) {
+    void refreshOrganizeDiff()
+  }
+})
 
 async function onOrganizeCleared() {
   selectedPersonId.value = null
