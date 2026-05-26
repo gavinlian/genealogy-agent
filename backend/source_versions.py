@@ -8,6 +8,77 @@ import uuid
 from datetime import datetime
 from typing import Any
 
+VERSION_KIND_OCR_RAW = "ocr_raw"
+VERSION_KIND_RELATION_DESC = "relation_desc"
+VERSION_KIND_CUSTOM = "custom"
+
+DEFAULT_LABELS = {
+    VERSION_KIND_OCR_RAW: "版本一 · OCR 原文",
+    VERSION_KIND_RELATION_DESC: "版本二 · 关系描述",
+    VERSION_KIND_CUSTOM: "版本三 · 自定义",
+}
+
+TEXT_EDITION_NOTE_PREFIX = "text_from:"
+DERIVED_FROM_NOTE_PREFIX = "derived_from:"
+LAYOUT_NOTE_PREFIX = "layout:"
+IMAGE_NOTE_PREFIX = "image:"
+
+VALID_SOURCE_LAYOUTS = frozenset({"horizontal_ltr", "horizontal_rtl", "vertical_rl", "prose"})
+DEFAULT_SOURCE_LAYOUT = "horizontal_ltr"
+
+
+def parse_version_note(note: str | None) -> dict[str, str | None]:
+    """解析版本 note 中的 layout / image / derived_from 等字段。"""
+    out: dict[str, str | None] = {
+        "layout": DEFAULT_SOURCE_LAYOUT,
+        "image_path": None,
+        "derived_from": None,
+    }
+    for part in (note or "").split("|"):
+        token = part.strip()
+        if not token:
+            continue
+        if token.startswith(LAYOUT_NOTE_PREFIX):
+            layout = token[len(LAYOUT_NOTE_PREFIX):].strip()
+            if layout in VALID_SOURCE_LAYOUTS:
+                out["layout"] = layout
+        elif token.startswith(IMAGE_NOTE_PREFIX):
+            out["image_path"] = token[len(IMAGE_NOTE_PREFIX):].strip() or None
+        elif token.startswith(DERIVED_FROM_NOTE_PREFIX):
+            out["derived_from"] = token[len(DERIVED_FROM_NOTE_PREFIX):].strip() or None
+    return out
+
+
+def merge_version_note(
+    note: str | None,
+    *,
+    layout: str | None = None,
+    image_path: str | None = None,
+) -> str | None:
+    """合并 note 字段，保留未覆盖的既有信息。"""
+    parsed = parse_version_note(note)
+    if layout and layout in VALID_SOURCE_LAYOUTS:
+        parsed["layout"] = layout
+    if image_path is not None:
+        parsed["image_path"] = image_path or None
+
+    parts: list[str] = []
+    if parsed.get("image_path"):
+        parts.append(f"{IMAGE_NOTE_PREFIX}{parsed['image_path']}")
+    if parsed.get("layout") and parsed["layout"] != DEFAULT_SOURCE_LAYOUT:
+        parts.append(f"{LAYOUT_NOTE_PREFIX}{parsed['layout']}")
+    if parsed.get("derived_from"):
+        parts.append(f"{DERIVED_FROM_NOTE_PREFIX}{parsed['derived_from']}")
+
+    for part in (note or "").split("|"):
+        token = part.strip()
+        if not token:
+            continue
+        if token.startswith(TEXT_EDITION_NOTE_PREFIX):
+            parts.append(token)
+
+    return "|".join(parts) if parts else None
+
 
 def _now() -> str:
     return datetime.now().isoformat()
@@ -28,6 +99,9 @@ def _row_to_version(row: sqlite3.Row | dict) -> dict:
         data["source_annotations"] = json.loads(ann) if isinstance(ann, str) else ann
     except json.JSONDecodeError:
         data["source_annotations"] = []
+    note_meta = parse_version_note(data.get("note"))
+    data["layout_hint"] = note_meta.get("layout") or DEFAULT_SOURCE_LAYOUT
+    data["image_path"] = note_meta.get("image_path")
     return data
 
 
@@ -42,6 +116,7 @@ def ensure_versions_table(cursor: sqlite3.Cursor) -> None:
             source_annotations TEXT DEFAULT '[]',
             status TEXT DEFAULT 'draft',
             note TEXT,
+            version_kind TEXT DEFAULT 'custom',
             created_at TEXT NOT NULL,
             updated_at TEXT,
             UNIQUE(family_id, version_no)
@@ -49,6 +124,12 @@ def ensure_versions_table(cursor: sqlite3.Cursor) -> None:
     )
     try:
         cursor.execute("ALTER TABLE families ADD COLUMN active_source_version_id TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute(
+            "ALTER TABLE family_source_versions ADD COLUMN version_kind TEXT DEFAULT 'custom'"
+        )
     except sqlite3.OperationalError:
         pass
 
@@ -179,6 +260,7 @@ def create_source_version(
     label: str | None = None,
     status: str = "draft",
     note: str | None = None,
+    version_kind: str = VERSION_KIND_CUSTOM,
     set_active: bool = False,
 ) -> str:
     ensure_versions_table(cursor)
@@ -194,9 +276,9 @@ def create_source_version(
     cursor.execute(
         """INSERT INTO family_source_versions (
             id, family_id, version_no, label, source_text, source_annotations,
-            status, note, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (vid, family_id, version_no, label, source_text or "", ann, status, note, now, now),
+            status, note, version_kind, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (vid, family_id, version_no, label, source_text or "", ann, status, note, version_kind, now, now),
     )
     if set_active or status == "confirmed":
         _sync_family_from_version(cursor, family_id, vid)
@@ -265,7 +347,168 @@ def set_active_source_version(cursor: sqlite3.Cursor, family_id: str, version_id
     return get_source_version(cursor, family_id, version_id)
 
 
-TEXT_EDITION_NOTE_PREFIX = "text_from:"
+def find_version_by_kind(cursor: sqlite3.Cursor, family_id: str, kind: str) -> dict | None:
+    """按 version_kind 查找该族谱最新一版（OCR 三版流水线）。"""
+    migrate_legacy_family_source(cursor, family_id)
+    row = cursor.execute(
+        """SELECT * FROM family_source_versions
+           WHERE family_id = ? AND version_kind = ?
+           ORDER BY version_no DESC LIMIT 1""",
+        (family_id, kind),
+    ).fetchone()
+    return _row_to_version(row) if row else None
+
+
+def upsert_version_by_kind(
+    cursor: sqlite3.Cursor,
+    family_id: str,
+    kind: str,
+    *,
+    source_text: str = "",
+    source_annotations: Any = None,
+    label: str | None = None,
+    status: str = "draft",
+    note: str | None = None,
+    parent_version_id: str | None = None,
+    set_active: bool = False,
+) -> dict:
+    """按 kind 创建或更新固定语义版本（版本一/二/三）。"""
+    ensure_versions_table(cursor)
+    existing = find_version_by_kind(cursor, family_id, kind)
+    lbl = label or DEFAULT_LABELS.get(kind, f"版本 · {kind}")
+    nte = note
+    if parent_version_id:
+        derived = f"{DERIVED_FROM_NOTE_PREFIX}{parent_version_id}"
+        nte = derived if not note else f"{note}|{derived}"
+
+    if existing:
+        version = update_source_version(
+            cursor,
+            family_id,
+            existing["id"],
+            source_text=source_text,
+            source_annotations=source_annotations,
+            label=lbl,
+            note=nte,
+        )
+        if version and status:
+            cursor.execute(
+                "UPDATE family_source_versions SET status=?, updated_at=? WHERE id=?",
+                (status, _now(), existing["id"]),
+            )
+            version = get_source_version(cursor, family_id, existing["id"])
+    else:
+        vid = create_source_version(
+            cursor,
+            family_id,
+            source_text=source_text,
+            source_annotations=source_annotations or "[]",
+            label=lbl,
+            status=status,
+            note=nte,
+            version_kind=kind,
+            set_active=set_active,
+        )
+        version = get_source_version(cursor, family_id, vid)
+
+    if set_active and version:
+        set_active_source_version(cursor, family_id, version["id"])
+        version = get_source_version(cursor, family_id, version["id"])
+
+    if not version:
+        raise ValueError(f"无法保存 {lbl}")
+    return version
+
+
+def get_digitize_source_for_family(cursor: sqlite3.Cursor, family_id: str) -> tuple[str, dict | None]:
+    """数字化/组谱优先用版本三 > 版本二 > 版本一。"""
+    migrate_legacy_family_source(cursor, family_id)
+    for kind in (VERSION_KIND_CUSTOM, VERSION_KIND_RELATION_DESC, VERSION_KIND_OCR_RAW):
+        version = find_version_by_kind(cursor, family_id, kind)
+        if version and (version.get("source_text") or "").strip():
+            return version["source_text"], version
+    return get_active_source_for_family(cursor, family_id)
+
+
+def save_ocr_scan_versions(
+    cursor: sqlite3.Cursor,
+    family_id: str,
+    *,
+    ocr_text: str = "",
+    relation_description: str = "",
+    custom_text: str = "",
+    source_annotations: Any = None,
+    image_path: str | None = None,
+    layout_hint: str = DEFAULT_SOURCE_LAYOUT,
+    active_kind: str = VERSION_KIND_RELATION_DESC,
+) -> dict:
+    """OCR 扫描入库：版本一 OCR 原文 + 版本二 关系描述 + 可选版本三 用户修正。"""
+    ocr = (ocr_text or "").strip()
+    rel = (relation_description or "").strip()
+    custom = (custom_text or "").strip()
+    if not ocr and not rel:
+        raise ValueError("至少需要版本一 OCR 原文或版本二关系描述")
+
+    v1 = find_version_by_kind(cursor, family_id, VERSION_KIND_OCR_RAW)
+    note_v1 = merge_version_note(
+        v1.get("note") if v1 else None,
+        layout=layout_hint if layout_hint in VALID_SOURCE_LAYOUTS else DEFAULT_SOURCE_LAYOUT,
+        image_path=image_path,
+    )
+    if ocr:
+        v1 = upsert_version_by_kind(
+            cursor,
+            family_id,
+            VERSION_KIND_OCR_RAW,
+            source_text=ocr,
+            source_annotations=source_annotations,
+            status="confirmed",
+            note=note_v1,
+        )
+
+    v2 = find_version_by_kind(cursor, family_id, VERSION_KIND_RELATION_DESC)
+    if rel:
+        v2 = upsert_version_by_kind(
+            cursor,
+            family_id,
+            VERSION_KIND_RELATION_DESC,
+            source_text=rel,
+            parent_version_id=v1["id"] if v1 else None,
+            status="draft",
+            set_active=active_kind == VERSION_KIND_RELATION_DESC,
+        )
+
+    v3 = find_version_by_kind(cursor, family_id, VERSION_KIND_CUSTOM)
+    if custom:
+        parent_id = v2["id"] if v2 else (v1["id"] if v1 else None)
+        v3 = upsert_version_by_kind(
+            cursor,
+            family_id,
+            VERSION_KIND_CUSTOM,
+            source_text=custom,
+            parent_version_id=parent_id,
+            status="confirmed",
+            set_active=active_kind == VERSION_KIND_CUSTOM,
+        )
+
+    active = v2 or v1
+    if active_kind == VERSION_KIND_OCR_RAW and v1:
+        active = v1
+    elif active_kind == VERSION_KIND_RELATION_DESC and v2:
+        active = v2
+    elif active_kind == VERSION_KIND_CUSTOM and v3:
+        active = v3
+    if active:
+        set_active_source_version(cursor, family_id, active["id"])
+
+    payload = list_source_versions(cursor, family_id)
+    return {
+        "version_ocr_raw": v1,
+        "version_relation_desc": v2,
+        "version_custom": v3,
+        "active_version_id": active["id"] if active else payload.get("active_version_id"),
+        **payload,
+    }
 
 
 def upsert_text_edition_from_source(
@@ -310,6 +553,7 @@ def upsert_text_edition_from_source(
             label=label,
             status="draft",
             note=note,
+            version_kind=VERSION_KIND_RELATION_DESC,
             set_active=set_active,
         )
         version = get_source_version(cursor, family_id, vid)

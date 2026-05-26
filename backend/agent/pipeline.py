@@ -9,6 +9,45 @@ from .two_stage_parse import run_two_stage_genealogy_parse
 PARSE_PROMPT_TEMPLATE = OCR_PROMPT
 
 
+async def run_ocr_only(
+    image_base64: str,
+    *,
+    ocr_provider: str,
+    ocr_model: str,
+    ocr_fn: Callable[[str, str, str, str], Awaitable[tuple[str, str]]],
+) -> dict[str, Any]:
+    """仅 OCR：图片 → 版本一原文（不整理关系）。"""
+    if not image_base64:
+        return {"success": False, "error": "缺少图片数据", "step": "input"}
+
+    recognized_text, ocr_error = await ocr_fn(ocr_provider, ocr_model, image_base64, OCR_PROMPT)
+    if ocr_error:
+        return {
+            "success": False,
+            "error": ocr_error,
+            "step": "ocr",
+            "provider": ocr_provider,
+            "model": ocr_model,
+        }
+
+    raw_text = recognized_text.strip()
+    if not raw_text:
+        return {
+            "success": False,
+            "error": "OCR 未识别到文字",
+            "step": "ocr",
+            "provider": ocr_provider,
+            "model": ocr_model,
+        }
+
+    return {
+        "success": True,
+        "step": "ocr",
+        "text": raw_text,
+        "ocr": {"provider": ocr_provider, "model": ocr_model},
+    }
+
+
 async def run_scan_pipeline(
     image_base64: str,
     *,

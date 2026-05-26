@@ -118,6 +118,9 @@
             </select>
             <span v-if="currentSourceVersion?.status === 'confirmed'" class="source-version-tag confirmed">已确认</span>
             <span v-else class="source-version-tag draft">草稿</span>
+            <button type="button" class="btn-xs" :disabled="sourceVersions.length < 2" @click="compareSourceVersions">
+              版本对比
+            </button>
             <button type="button" class="btn-xs" :disabled="!ocrEditableText.trim()" @click="saveAsNewSourceVersion">
               另存为…
             </button>
@@ -139,13 +142,18 @@
               删除此版
             </button>
           </div>
+          <p v-if="sourceVersionDiff?.summary" class="hint source-version-diff-summary">{{ sourceVersionDiff.summary }}</p>
+          <pre v-if="sourceVersionDiff?.diff_lines?.length" class="source-version-diff-pre">{{ sourceVersionDiff.diff_lines.slice(0, 80).join('\n') }}</pre>
           <p class="hint" style="margin:0 0 8px">
-            族谱原文编辑区 — OCR 后为第1版；校对后可「另存为」新版本。两阶段解析后会对比主谱差异，确认后再入库。
-            （{{ displayPerson ? '挂到「' + displayPerson.name + '」下' : '未选父节点则作为新成员' }}）
+            三版文字：版本一 OCR 原文（对应图片）→ 版本二 AI 关系描述（可组谱）→ 版本三 您的修正稿。组谱默认用版本二；确认版本三后可切换为定稿。
           </p>
           <OcrTextWorkspace
             v-model="ocrEditableText"
             v-model:annotations="ocrAnnotations"
+            :preview-persons="parsedPersons"
+            :preview-relations="parsedRelations"
+            :structured-text="ocrRelationDescription || ocrEditableText"
+            :view-title="currentFamily?.name || '族谱'"
             :relation-link-from="relationLinkFromName"
             compact
             @add-person="addAnnotatedPersonToFamily"
@@ -332,143 +340,60 @@
             </div>
           </aside>
 
-          <!-- 中间树状图 -->
-          <div class="workspace-canvas">
-            <div class="canvas-toolbar">
-              <select v-model="treeStyle" class="input input-inline canvas-style-select" @change="loadTree">
-                <option value="silkworm">垂丝图（推荐·按世分行）</option>
-                <option value="su">苏式</option>
-                <option value="eu">欧式</option>
-                <option value="tower">宝塔式</option>
-                <option value="radial">圆形图谱</option>
-              </select>
-              <span class="toolbar-divider"></span>
-              <button type="button" class="btn-xs" @click="zoomOut" title="缩小">−</button>
-              <span class="canvas-zoom-label">{{ treeZoom }}%</span>
-              <button type="button" class="btn-xs" @click="zoomIn" title="放大">+</button>
-              <button type="button" class="btn-xs" @click="fitTreeToView">适应屏幕</button>
-              <button type="button" class="btn-xs" @click="zoomReset">重置</button>
-              <button
-                type="button"
-                class="btn-xs"
-                :class="{ 'btn-primary': relationLinkMode }"
-                title="开启后依次点击两个成员建立关系"
-                @click="toggleRelationLinkMode"
-              >
-                {{ relationLinkMode ? '连线中…' : '连线' }}
-              </button>
-              <span v-if="relationLinkFromId" class="hint canvas-link-hint">
-                已选「{{ personName(relationLinkFromId) }}」，请点击另一成员
-                <button type="button" class="btn-xs" @click="relationLinkFromId = null">取消</button>
-              </span>
-              <span v-if="buildStats" class="hint" style="margin:0">
+          <!-- 中间：参考 App 两种族谱阅读样式 -->
+          <div class="workspace-canvas workspace-canvas--reference">
+            <div class="canvas-toolbar canvas-toolbar--reference">
+              <div class="ocr-view-mode-group" role="tablist" aria-label="族谱样式">
+                <button
+                  type="button"
+                  role="tab"
+                  class="ocr-view-mode-btn"
+                  :class="{ active: genealogyViewMode === 'page' }"
+                  @click="genealogyViewMode = 'page'"
+                >
+                  谱页 · 右起世系
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  class="ocr-view-mode-btn"
+                  :class="{ active: genealogyViewMode === 'card' }"
+                  @click="genealogyViewMode = 'card'"
+                >
+                  卡片 · 竖排世代
+                </button>
+              </div>
+              <span v-if="buildStats" class="hint canvas-stats-hint">
                 {{ buildStats.person_count }} 人 · {{ buildStats.relation_count }} 关系
               </span>
+              <span class="toolbar-divider canvas-stats-hint"></span>
+              <button type="button" class="btn-xs" title="缩小" @click="referenceZoomOut">−</button>
+              <span class="canvas-zoom-label">{{ referenceZoomLabel }}</span>
+              <button type="button" class="btn-xs" title="放大" @click="referenceZoomIn">+</button>
+              <button type="button" class="btn-xs" @click="referenceFitView">适应</button>
+              <button type="button" class="btn-xs" @click="referenceZoomReset">100%</button>
             </div>
-            <div
-              ref="treeViewport"
-              class="tree-canvas-viewport"
-              :class="{ panning: isPanning, 'name-drop-target': treeNameDropActive }"
-              @wheel.prevent="onTreeWheel"
-              @mousedown="onCanvasPanStart"
-              @touchstart="onCanvasTouchStart"
-              @touchmove="onCanvasTouchMove"
-              @touchend="onCanvasTouchEnd"
-              @touchcancel="onCanvasTouchEnd"
-              @dragover.prevent="onTreeDragOver"
-              @dragleave="onTreeDragLeave"
-              @drop="onTreeNameDrop"
-            >
-              <div
-                class="tree-canvas-inner"
-                :style="{ transform: `translate(${treePan.x}px, ${treePan.y}px) scale(${treeZoom / 100})` }"
-              >
-                <div
-                  class="tree-view"
-                  :class="[
-                    'tree-' + treeStyle,
-                    { 'tree-layout-absolute': isAbsoluteTreeLayout, 'tree-compact': treeCompact, 'tree-silkworm-labeled': treeStyle === 'silkworm' },
-                  ]"
-                  :style="treeViewSizeStyle"
-                >
-                  <template v-if="treeStyle === 'silkworm'">
-                    <div
-                      v-for="row in silkwormGenerationRows"
-                      :key="'band-' + row.generation"
-                      class="tree-gen-row-band"
-                      :class="{ 'tree-gen-row-band--alt': row.even }"
-                      :style="{ top: (row.top - 6) + 'px', height: row.height + 'px' }"
-                    />
-                    <div
-                      v-for="row in silkwormGenerationRows"
-                      :key="'label-' + row.generation"
-                      class="tree-gen-row-label"
-                      :style="{ top: row.top + 'px', height: row.height + 'px' }"
-                    >
-                      <span class="tree-gen-row-title">第{{ row.generation }}世</span>
-                      <span class="tree-gen-row-count">{{ row.count }}人</span>
-                    </div>
-                  </template>
-                  <svg
-                    v-if="isAbsoluteTreeLayout && treeEdges.length"
-                    class="tree-edges-layer"
-                    :width="treeDisplayWidth"
-                    :height="treeBounds.height"
-                  >
-                    <line
-                      v-for="(e, i) in treeEdges"
-                      :key="'edge' + i"
-                      :x1="e.x1"
-                      :y1="e.y1"
-                      :x2="e.x2"
-                      :y2="e.y2"
-                      :class="e.type === 'spouse' ? 'tree-edge-spouse' : 'tree-edge-parent'"
-                    />
-                  </svg>
-                  <div
-                    v-for="p in treeNodes"
-                    :key="p.id"
-                    class="tree-node"
-                    :style="treeNodeStyle(p)"
-                    @click.stop="onTreeNodeClick(p, $event)"
-                  >
-                    <div
-                      class="tree-node-card"
-                      :class="[
-                        'gender-' + (p.gender || 'unknown'),
-                        {
-                          'tree-node-selected': selectedPersonId === p.id,
-                          'tree-node-link-from': relationLinkFromId === p.id,
-                          'is-placeholder': p.is_placeholder,
-                        },
-                      ]"
-                      title="单击查看详情，双击聚焦放大"
-                      @dblclick.stop="focusPerson(p.id)"
-                    >
-                      <div class="node-content">
-                        <span class="node-name">{{ p.name }}</span>
-                        <span v-if="p.birth_year" class="node-years">
-                          {{ p.birth_year }}<span v-if="p.death_year">–{{ p.death_year }}</span>
-                        </span>
-                        <span v-if="p.generation" class="node-gen">第{{ p.generation }}代</span>
-                        <span v-if="p.generation_name" class="node-gen">{{ p.generation_name }}</span>
-                      </div>
-                    </div>
-                  </div>
-                  <div v-if="treeNodes.length === 0" class="empty-state">
-                    <div class="empty-icon">🌳</div>
-                    <h3>族谱树还是空的</h3>
-                    <p>扫描老族谱或手动添加第一位祖先</p>
-                    <button class="btn-primary btn-sm" @click="openAddPerson">添加成员</button>
-                  </div>
-                </div>
-              </div>
+            <GenealogyReferenceViewport
+              v-if="persons.length"
+              ref="referenceViewportRef"
+              :mode="genealogyViewMode"
+              :persons="persons"
+              :relations="relations"
+              :structured-text="activeSourceText"
+              :title="currentFamily?.name || '族谱'"
+              :selected-person-id="selectedPersonId"
+              @select="selectPersonFromReference"
+            />
+            <div v-if="persons.length" class="canvas-touch-controls">
+              <button type="button" class="canvas-touch-btn" aria-label="放大" @click="referenceZoomIn">+</button>
+              <button type="button" class="canvas-touch-btn canvas-touch-btn--fit" aria-label="适应" @click="referenceFitView">⊡</button>
+              <button type="button" class="canvas-touch-btn" aria-label="缩小" @click="referenceZoomOut">−</button>
             </div>
-            <p class="canvas-touch-hint">单指拖动 · 双指缩放</p>
-            <div class="canvas-touch-controls">
-              <button type="button" class="canvas-touch-btn" aria-label="放大" @click="zoomIn">+</button>
-              <button type="button" class="canvas-touch-btn canvas-touch-btn--fit" aria-label="适应屏幕" @click="fitTreeToView">⊡</button>
-              <button type="button" class="canvas-touch-btn" aria-label="缩小" @click="zoomOut">−</button>
+            <div v-else class="empty-state workspace-reference-empty">
+              <div class="empty-icon">🌳</div>
+              <h3>族谱还是空的</h3>
+              <p>扫描老族谱或手动添加第一位祖先</p>
+              <button class="btn-primary btn-sm" @click="openAddPerson">添加成员</button>
             </div>
           </div>
 
@@ -487,8 +412,8 @@
               </div>
             </div>
             <div v-if="!displayPerson" class="detail-body detail-empty">
-              <p>在左侧「世代导航」或中间<strong>垂丝图</strong>中点击成员卡片，查看详情</p>
-              <p class="hint">单击节点查看详情 · 双击节点聚焦 · 左侧导航会同步定位到该行</p>
+              <p>在左侧「世代导航」或中间<strong>谱页 / 卡片</strong>中点击成员，查看详情</p>
+              <p class="hint">谱页：右起世系竖排 · 卡片：按代竖排姓名</p>
             </div>
             <div v-else class="detail-body">
               <div class="detail-field">
@@ -715,7 +640,7 @@
             </div>
             <input type="file" ref="fileInput" @change="handleImageSelect" accept="image/*" style="display:none" />
 
-            <div v-if="ocrLoading" class="loading">智能识别中，请稍候…</div>
+            <div v-if="ocrLoading" class="loading">正在识别图片文字…</div>
             <p v-if="previewImage && !ocrLoading" class="ocr-model-hint">
               OCR: {{ providerLabel(getProvider(ocrConfig.provider)) }} / {{ ocrConfig.model }}
               · 解析: {{ providerLabel(getProvider(parseConfig.provider)) }} / {{ parseConfig.model }}
@@ -730,43 +655,102 @@
           <div v-if="ocrStep === 'result'" class="ocr-step ocr-step-result">
             <div class="ocr-result-layout">
               <div class="ocr-result-left">
-                <p class="ocr-section-title">扫描文字（可编辑、复制、标注姓名）</p>
-                <OcrTextWorkspace
-                  v-model="ocrEditableText"
-                  v-model:annotations="ocrAnnotations"
-                  :image-preview="previewImage"
-                  :relation-link-from="relationLinkFromName"
-                  @add-person="addAnnotatedPersonToParsed"
-                  @set-link-from="relationLinkFromName = $event"
-                  @create-link="createRelationFromNames"
-                  @clear-link="relationLinkFromName = null"
-                />
-                <div v-if="ocrRelationDescription" class="ocr-relation-desc-box">
+                <div v-if="ocrDescribingV2" class="ocr-describing-banner" role="status">
+                  <span class="ocr-describing-spinner" aria-hidden="true"></span>
+                  版本一已识别完成，正在详细整理人物关系…
+                </div>
+                <div class="ocr-version-tabs">
+                  <button type="button" class="ocr-version-tab" :class="{ active: ocrVersionTab === 'v1' }" @click="ocrVersionTab = 'v1'">
+                    版本一 · OCR 原文
+                  </button>
+                  <button type="button" class="ocr-version-tab" :class="{ active: ocrVersionTab === 'v2' }" @click="ocrVersionTab = 'v2'">
+                    版本二 · 关系描述
+                  </button>
+                  <button type="button" class="ocr-version-tab" :class="{ active: ocrVersionTab === 'v3' }" @click="ocrVersionTab = 'v3'">
+                    版本三 · 修正稿
+                  </button>
+                </div>
+                <p v-if="ocrVersionTab === 'v1'" class="hint ocr-version-hint">对应扫描图片的忠实 OCR 转写，可标注姓名、可编辑。</p>
+                <p v-else-if="ocrVersionTab === 'v2'" class="hint ocr-version-hint">AI 从版本一整理的关系描述稿，用于数字化组谱（可重新生成）。</p>
+                <p v-else class="hint ocr-version-hint">您的手工修正（可与原文无关）；保存后可用于对比与定稿。</p>
+
+                <div v-show="ocrVersionTab === 'v1'">
+                  <OcrTextWorkspace
+                    v-model="ocrEditableText"
+                    v-model:annotations="ocrAnnotations"
+                    :preview-persons="parsedPersons"
+                    :preview-relations="parsedRelations"
+                    :structured-text="ocrRelationDescription || ocrEditableText"
+                    view-title="扫描识别"
+                    :image-preview="previewImage"
+                    :relation-link-from="relationLinkFromName"
+                    @add-person="addAnnotatedPersonToParsed"
+                    @set-link-from="relationLinkFromName = $event"
+                    @create-link="createRelationFromNames"
+                    @clear-link="relationLinkFromName = null"
+                  />
+                </div>
+
+                <div v-show="ocrVersionTab === 'v2'" class="ocr-version-editor">
                   <div class="ocr-relation-desc-header">
-                    <strong>关系描述稿（AI 第一步整理）</strong>
+                    <strong>版本二 · 关系描述稿</strong>
                     <span v-if="ocrParseSteps.length" class="hint">流程：{{ ocrParseSteps.join(' → ') }}</span>
                   </div>
-                  <pre class="ocr-relation-desc-text">{{ ocrRelationDescription }}</pre>
+                  <div v-if="ocrDescribingV2 && !ocrRelationDescription.trim()" class="ocr-describing-placeholder">
+                    <span class="ocr-describing-spinner" aria-hidden="true"></span>
+                    正在根据版本一整理人物关系，请稍候…
+                  </div>
+                  <textarea
+                    v-else
+                    v-model="ocrRelationDescription"
+                    class="input ocr-version-textarea"
+                    rows="14"
+                    placeholder="扫描完成后自动生成；也可从版本一重新生成"
+                  />
                   <div class="ocr-relation-desc-actions">
-                    <button type="button" class="btn-xs btn-secondary" @click="adoptRelationDescription">
-                      采用为校对原文
+                    <button
+                      type="button"
+                      class="btn-xs btn-secondary"
+                      :disabled="ocrRegeneratingV2 || ocrDescribingV2 || !ocrEditableText.trim()"
+                      @click="regenerateOcrV2"
+                    >
+                      {{ ocrRegeneratingV2 ? '生成中…' : '从版本一重新生成' }}
                     </button>
                     <button type="button" class="btn-xs" @click="copyRelationDescription">复制</button>
                   </div>
                 </div>
+
+                <div v-show="ocrVersionTab === 'v3'" class="ocr-version-editor">
+                  <div class="ocr-relation-desc-header">
+                    <strong>版本三 · 修正稿</strong>
+                    <button type="button" class="btn-xs" @click="initCustomFromV2">从版本二复制</button>
+                  </div>
+                  <textarea
+                    v-model="ocrCustomText"
+                    class="input ocr-version-textarea"
+                    rows="14"
+                    placeholder="在此修正 OCR 错误或补充关系；可与版本一无关"
+                  />
+                </div>
+
                 <div class="ocr-reparse-row">
                   <button
                     class="btn-secondary btn-sm"
-                    :disabled="ocrReparsing || !ocrEditableText.trim()"
+                    :disabled="ocrReparsing || ocrDescribingV2 || !digitizeSourceText.trim()"
                     @click="reparseFromEditedText"
                   >
-                    {{ ocrReparsing ? '两阶段解析中…' : '两阶段解析（描述稿→数字化）' }}
+                    {{ ocrReparsing ? '数字化解析中…' : '从组谱用文字解析入库预览' }}
                   </button>
-                  <span v-if="ocrTextDirty" class="hint">文字已修改，建议重新解析后再保存</span>
+                  <span class="hint">优先版本三 → 版本二 → 版本一</span>
                 </div>
               </div>
 
               <div class="ocr-result-right">
+            <div v-if="ocrDescribingV2 && !genealogyStats" class="ocr-describing-placeholder ocr-describing-placeholder-compact">
+              <span class="ocr-describing-spinner" aria-hidden="true"></span>
+              正在整理人物关系并生成族谱预览…
+            </div>
+
             <div v-if="scanValidation && scanValidation.issue_count > 0" class="validation-box">
               <p>数据校验（{{ scanValidation.error_count }} 错误 / {{ scanValidation.warning_count }} 警告）</p>
               <ul>
@@ -1116,6 +1100,8 @@
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { useToast } from './composables/useToast'
 import { buildPersonTree, flattenNavTree, collectAllNavIds } from './utils/treeNav'
+import GenealogyReferenceViewport from './components/view/GenealogyReferenceViewport.vue'
+import GenealogyReferenceView, { type ReferenceViewMode } from './components/view/GenealogyReferenceView.vue'
 import OcrTextWorkspace from './components/OcrTextWorkspace.vue'
 import AiOrganizeDialog from './components/AiOrganizeDialog.vue'
 import FamilyChatShell from './components/FamilyChatShell.vue'
@@ -1291,6 +1277,11 @@ const ocrEditableText = ref('')
 const ocrAnnotations = ref<NameAnnotation[]>([])
 const ocrReparsing = ref(false)
 const ocrRelationDescription = ref('')
+const ocrCustomText = ref('')
+const ocrVersionTab = ref<'v1' | 'v2' | 'v3'>('v1')
+const sourceVersionDiff = ref<any>(null)
+const ocrRegeneratingV2 = ref(false)
+const ocrDescribingV2 = ref(false)
 const ocrParseSteps = ref<string[]>([])
 const ocrParsedBaseline = ref('')
 const parsedListDragOver = ref(false)
@@ -1311,7 +1302,10 @@ const personForm = ref({
   biography: '', spouse_id: '',
 })
 
-const treeStyle = ref<'su' | 'eu' | 'tower' | 'silkworm' | 'radial'>('silkworm')
+const genealogyViewMode = ref<ReferenceViewMode>('page')
+const referenceViewportRef = ref<InstanceType<typeof GenealogyReferenceViewport> | null>(null)
+const referenceZoomLabel = ref('100%')
+const treeStyle = ref<'silkworm'>('silkworm')
 const treeNodes = ref<any[]>([])
 const searchQuery = ref('')
 const searchMode = ref<'keyword' | 'nl'>('keyword')
@@ -1498,6 +1492,14 @@ const activeSourceText = computed(() => {
   const fromVersion = currentSourceVersion.value?.source_text?.trim()
   if (fromVersion) return fromVersion
   return (currentFamily.value?.source_text || '').trim()
+})
+
+const digitizeSourceText = computed(() => {
+  const v3 = ocrCustomText.value.trim()
+  if (v3) return v3
+  const v2 = ocrRelationDescription.value.trim()
+  if (v2) return v2
+  return ocrEditableText.value.trim()
 })
 
 function familyInitial(f: { name?: string; surname?: string }) {
@@ -1713,7 +1715,36 @@ function selectPerson(id: string, opts?: { focusOnTree?: boolean }) {
 }
 
 function selectPersonFromNav(id: string) {
-  selectPerson(id, { focusOnTree: true })
+  selectPerson(id)
+}
+
+function selectPersonFromReference(id: string) {
+  selectPerson(id)
+}
+
+function syncReferenceZoomLabel() {
+  const s = referenceViewportRef.value?.scale?.value ?? 1
+  referenceZoomLabel.value = `${Math.round(s * 100)}%`
+}
+
+function referenceZoomIn() {
+  referenceViewportRef.value?.zoomIn()
+  syncReferenceZoomLabel()
+}
+
+function referenceZoomOut() {
+  referenceViewportRef.value?.zoomOut()
+  syncReferenceZoomLabel()
+}
+
+function referenceZoomReset() {
+  referenceViewportRef.value?.zoomReset()
+  syncReferenceZoomLabel()
+}
+
+function referenceFitView() {
+  referenceViewportRef.value?.fitView()
+  syncReferenceZoomLabel()
 }
 
 function focusPerson(id: string) {
@@ -2020,21 +2051,87 @@ async function viewFamily(id: string) {
   fitTreeToView()
 }
 
-function versionOptionLabel(v: { label?: string; version_no?: number; status?: string }) {
+function versionOptionLabel(v: { label?: string; version_no?: number; status?: string; version_kind?: string }) {
+  const kindTag =
+    v.version_kind === 'ocr_raw' ? '图' :
+    v.version_kind === 'relation_desc' ? '述' :
+    v.version_kind === 'custom' ? '改' : ''
   const name = v.label || `第${v.version_no}版`
-  return v.status === 'confirmed' ? `${name}（已确认）` : `${name}（草稿）`
+  const prefix = kindTag ? `[${kindTag}] ` : ''
+  const status = v.status === 'confirmed' ? '（已确认）' : '（草稿）'
+  return `${prefix}${name}${status}`
+}
+
+function initCustomFromV2() {
+  if (!ocrRelationDescription.value.trim()) {
+    showToast('版本二暂无内容', 'info')
+    return
+  }
+  ocrCustomText.value = ocrRelationDescription.value
+  ocrVersionTab.value = 'v3'
+  showToast('已从版本二复制到修正稿', 'success')
+}
+
+async function regenerateOcrV2() {
+  if (!ocrEditableText.value.trim()) return
+  ocrRegeneratingV2.value = true
+  try {
+    const res = await api('POST', `/families/${ocrFamilyId.value}/source-versions/regenerate-relation-desc`, {
+      ocr_text: ocrEditableText.value,
+      parse: parseConfig.value,
+    }, API_TIMEOUT_LONG)
+    if (!res.success) {
+      showToast(res.detail || res.message || '生成失败', 'error')
+      return
+    }
+    ocrRelationDescription.value = res.relation_description || ''
+    ocrVersionTab.value = 'v2'
+    showToast('版本二关系描述已重新生成', 'success')
+  } catch (e: any) {
+    showToast(e.message || '生成失败', 'error')
+  } finally {
+    ocrRegeneratingV2.value = false
+  }
+}
+
+async function compareSourceVersions() {
+  const fid = currentFamily.value?.id
+  if (!fid || sourceVersions.value.length < 2) return
+  const v2 = sourceVersions.value.find((v) => v.version_kind === 'relation_desc')
+  const v3 = sourceVersions.value.find((v) => v.version_kind === 'custom')
+  const fromId = v2?.id || sourceVersions.value[0]?.id
+  const toId = v3?.id || sourceVersions.value[sourceVersions.value.length - 1]?.id
+  if (!fromId || !toId || fromId === toId) {
+    showToast('需要至少两个不同版本才能对比', 'info')
+    return
+  }
+  const res = await api('GET', `/families/${fid}/source-versions/compare?from_id=${fromId}&to_id=${toId}`)
+  if (!res.success) {
+    showToast(res.detail || '对比失败', 'error')
+    return
+  }
+  sourceVersionDiff.value = res.diff
+  showToast(res.diff?.summary || '对比完成', 'info')
 }
 
 function applySourceVersionToEditor(version: any) {
-  ocrEditableText.value = version?.source_text || ''
-  ocrParsedBaseline.value = ocrEditableText.value
-  try {
-    const raw = version?.source_annotations
-    if (!raw) ocrAnnotations.value = []
-    else if (typeof raw === 'string') ocrAnnotations.value = JSON.parse(raw)
-    else ocrAnnotations.value = raw
-  } catch {
-    ocrAnnotations.value = []
+  const text = version?.source_text || ''
+  const kind = version?.version_kind
+  if (kind === 'relation_desc') {
+    ocrRelationDescription.value = text
+  } else if (kind === 'custom') {
+    ocrCustomText.value = text
+  } else {
+    ocrEditableText.value = text
+    ocrParsedBaseline.value = text
+    try {
+      const raw = version?.source_annotations
+      if (!raw) ocrAnnotations.value = []
+      else if (typeof raw === 'string') ocrAnnotations.value = JSON.parse(raw)
+      else ocrAnnotations.value = raw
+    } catch {
+      ocrAnnotations.value = []
+    }
   }
   familySourceDirty.value = false
 }
@@ -2201,9 +2298,11 @@ async function saveFamilySourceText() {
   }
 }
 
-async function parseTextContent(text: string) {
+async function parseTextContent(text: string, opts?: { relationText?: string; rawText?: string }) {
   const res = await api('POST', '/ocr/parse', {
-    text,
+    text: opts?.rawText || text,
+    relation_text: opts?.relationText || undefined,
+    skip_describe: Boolean(opts?.relationText),
     parse: parseConfig.value,
   }, API_TIMEOUT_LONG)
   if (res.success === false) {
@@ -2255,7 +2354,7 @@ function applyParseResult(parsed: {
   parsedPersons.value = mapParsedPersons(parsed.persons)
   genealogyStats.value = parsed.stats || null
   treePreviewNodes.value = parsed.treeNodes || []
-  scanValidation.value = parsed.validation || null
+  scanValidation.value = parsed.validation?.persons || parsed.validation || null
   pendingTextRelations.value = normalizeRelationsForBatch(parsed.relations)
 }
 
@@ -2865,6 +2964,9 @@ function goOCR() {
   ocrParsedBaseline.value = ''
   ocrAnnotations.value = []
   ocrRelationDescription.value = ''
+  ocrCustomText.value = ''
+  ocrVersionTab.value = 'v1'
+  ocrDescribingV2.value = false
   ocrParseSteps.value = []
   parsedPersons.value = []
   parsedRelations.value = []
@@ -2891,73 +2993,71 @@ function handleImageSelect(e: Event) {
 async function doOCR() {
   if (!previewImage.value) return
   ocrLoading.value = true
+  ocrDescribingV2.value = false
   scanValidation.value = null
+  ocrRelationDescription.value = ''
+  ocrCustomText.value = ''
+  ocrParseSteps.value = []
+  parsedPersons.value = []
+  parsedRelations.value = []
+  pendingTextRelations.value = []
+  genealogyStats.value = null
+  treePreviewNodes.value = []
 
   try {
     const base64 = previewImage.value.split(',')[1]
 
-    const res = await api('POST', '/agent/scan', {
+    const ocrRes = await api('POST', '/agent/scan-ocr', {
       image: base64,
       ocr: ocrConfig.value,
-      parse: parseConfig.value,
     }, API_TIMEOUT_LONG)
 
-    if (!res.success) {
-      alert(res.error || res.message || '扫描建谱失败')
+    if (!ocrRes.success) {
+      alert(ocrRes.error || ocrRes.message || '文字识别失败')
       return
     }
 
-    ocrResult.value = { text: res.text, provider: res.ocr?.provider, model: res.ocr?.model }
-    ocrEditableText.value = res.text || ''
-    ocrParsedBaseline.value = res.text || ''
-    ocrRelationDescription.value = res.relation_description || ''
-    ocrParseSteps.value = res.parse?.steps || ['ocr', 'describe', 'digitize']
+    ocrResult.value = {
+      text: ocrRes.text,
+      provider: ocrRes.ocr?.provider,
+      model: ocrRes.ocr?.model,
+    }
+    ocrEditableText.value = ocrRes.text || ''
+    ocrParsedBaseline.value = ocrRes.text || ''
     ocrAnnotations.value = []
-    scanValidation.value = res.validation?.persons || null
-
-    if (res.warning) {
-      console.warn(res.warning)
-    }
-
-    let persons = res.persons || []
-    let relations = res.relations || []
-    genealogyStats.value = res.genealogy_stats || null
-    treePreviewNodes.value = res.tree_preview?.nodes || []
-
-    if (!genealogyStats.value && res.text) {
-      const built = await api('POST', '/agent/generate', {
-        text: res.text,
-        persons,
-        relations,
-      })
-      if (built.success) {
-        persons = built.persons || persons
-        relations = built.relations || relations
-        genealogyStats.value = built.stats
-        treePreviewNodes.value = built.tree?.nodes || []
-      }
-    }
-
-    applyParseResult({
-      persons,
-      relations,
-      stats: genealogyStats.value,
-      treeNodes: treePreviewNodes.value,
-      validation: scanValidation.value,
-      relationDescription: ocrRelationDescription.value,
-      parseSteps: ocrParseSteps.value,
-    })
     ocrStep.value = 'result'
-    if (res.text) {
+    ocrVersionTab.value = 'v1'
+    ocrLoading.value = false
+
+    if (ocrRes.text) {
       autoExtractOcrNames()
     }
-    if (res.warning) {
-      alert(res.warning)
-    }
+
+    await continueOcrRelationDescribe(ocrRes.text || '')
   } catch (err: any) {
     alert(err?.message || '识别失败，请确认后端已启动且 API Key 正确')
   } finally {
     ocrLoading.value = false
+    ocrDescribingV2.value = false
+  }
+}
+
+async function continueOcrRelationDescribe(rawText: string) {
+  const text = (rawText || '').trim()
+  if (!text) return
+  ocrDescribingV2.value = true
+  try {
+    const parsed = await parseTextContent(text)
+    applyParseResult(parsed)
+    if (parsed.warning) {
+      showToast(parsed.warning, 'error')
+    } else if (parsed.relationDescription) {
+      showToast('人物关系已整理完成，可切换到「版本二」查看', 'success')
+    }
+  } catch (e: any) {
+    showToast(e.message || '人物关系整理失败', 'error')
+  } finally {
+    ocrDescribingV2.value = false
   }
 }
 
@@ -2988,17 +3088,22 @@ async function autoExtractOcrNames() {
 }
 
 async function reparseFromEditedText() {
-  if (!ocrEditableText.value.trim()) return
+  const raw = ocrEditableText.value.trim()
+  const rel = digitizeSourceText.value.trim()
+  if (!rel) return
   ocrReparsing.value = true
   try {
-    const parsed = await parseTextContent(ocrEditableText.value)
+    const parsed = await parseTextContent(rel, {
+      relationText: (ocrCustomText.value.trim() || ocrRelationDescription.value.trim()) || undefined,
+      rawText: raw || rel,
+    })
     applyParseResult(parsed)
     ocrParsedBaseline.value = ocrEditableText.value
     if (parsed.warning) {
       showToast(parsed.warning, 'error')
     }
   } catch (e: any) {
-    showToast(e.message || '两阶段解析失败', 'error')
+    showToast(e.message || '解析失败', 'error')
   } finally {
     ocrReparsing.value = false
   }
@@ -3394,12 +3499,20 @@ function normalizeRelationsForBatch(rels: any[]) {
 }
 
 async function saveParsedPersons() {
-  if (!ocrEditableText.value.trim() && !parsedPersons.value.length) return
+  if (!ocrEditableText.value.trim() && !digitizeSourceText.value.trim() && !parsedPersons.value.length) return
 
-  await api('PUT', `/families/${ocrFamilyId.value}/source-text`, {
-    source_text: ocrEditableText.value,
+  const activeKind = ocrCustomText.value.trim()
+    ? 'custom'
+    : ocrRelationDescription.value.trim()
+      ? 'relation_desc'
+      : 'ocr_raw'
+
+  await api('POST', `/families/${ocrFamilyId.value}/source-versions/save-ocr-pipeline`, {
+    ocr_text: ocrEditableText.value,
+    relation_description: ocrRelationDescription.value,
+    custom_text: ocrCustomText.value,
     source_annotations: ocrAnnotations.value,
-    origin: 'ocr',
+    active_kind: activeKind,
   })
 
   if (parsedPersons.value.length) {

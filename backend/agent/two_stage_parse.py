@@ -19,6 +19,7 @@ async def run_two_stage_genealogy_parse(
     parse_fn: ParseFn,
     *,
     skip_describe: bool = False,
+    relation_text_override: str | None = None,
 ) -> dict[str, Any]:
     """两阶段解析族谱文字，返回人物、关系及中间关系描述稿。"""
     raw_text = (raw_text or "").strip()
@@ -40,7 +41,12 @@ async def run_two_stage_genealogy_parse(
     parse_steps: list[str] = []
 
     relation_text = raw_text
-    if not skip_describe:
+    override = (relation_text_override or "").strip()
+    if override:
+        parse_steps.append("describe(existing)")
+        relation_description = override
+        relation_text = override
+    elif not skip_describe:
         parse_steps.append("describe")
         prompt1 = build_relation_describe_prompt(raw_text)
         content1, err1 = await parse_fn(prompt1)

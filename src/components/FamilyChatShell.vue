@@ -17,7 +17,7 @@ import {
 } from '../agent/homeSessions'
 import type { AgentMessage, AgentUiAction } from '../agent/types'
 import AgentChatPane from './agent/AgentChatPane.vue'
-import GenealogyTreeCanvas from './GenealogyTreeCanvas.vue'
+import GenealogyReferenceView, { type ReferenceViewMode } from './view/GenealogyReferenceView.vue'
 import { useChatSidebar } from '../composables/useChatSidebar'
 
 type FamilySummary = {
@@ -46,21 +46,19 @@ const emit = defineEmits<{
   deleteFamily: [family: FamilySummary]
 }>()
 
-type TabId = 'tree' | 'source' | 'person' | 'diff' | 'organize'
+type TabId = 'tree' | 'source'
 
 const TABS: { id: TabId; label: string; icon: string }[] = [
-  { id: 'tree', label: '树图', icon: '🌳' },
+  { id: 'tree', label: '族谱', icon: '🌳' },
   { id: 'source', label: '原文', icon: '📜' },
-  { id: 'person', label: '成员', icon: '👤' },
-  { id: 'diff', label: '对比', icon: '⚖' },
-  { id: 'organize', label: '整理', icon: '✨' },
 ]
 
 const agent = getAgent()
 
 const activeTab = ref<TabId>('tree')
+const genealogyViewMode = ref<ReferenceViewMode>('page')
 const persons = ref<any[]>([])
-const treeNodes = ref<any[]>([])
+const relations = ref<any[]>([])
 const selectedPersonId = ref<string | null>(null)
 const anchorPersonId = ref<string | null>(null)
 const messages = ref<AgentMessage[]>([])
@@ -69,7 +67,6 @@ const {
   isCompact,
   chatOpen: chatExpanded,
   openChat: openChatSidebar,
-  closeChat: closeChatSidebar,
   toggleChat: toggleChatExpanded,
 } = useChatSidebar()
 const confirmationLoading = ref<string | null>(null)
@@ -78,8 +75,6 @@ const loading = ref(false)
 const sourceText = ref('')
 const agentLinkHint = ref('')
 const pulseTab = ref<TabId | null>(null)
-const pulsePersonId = ref<string | null>(null)
-const treeCanvasRef = ref<InstanceType<typeof GenealogyTreeCanvas> | null>(null)
 
 const chatPlaceholder = computed(() =>
   hasFamily.value ? agent.placeholderWorkspace : agent.placeholderHome,
@@ -90,8 +85,9 @@ const chatPaneLayout = computed(() => (isCompact.value ? 'drawer' : 'sidebar'))
 const activeTabMeta = computed(() => TABS.find((t) => t.id === activeTab.value) || TABS[0])
 
 const sourceExcerpt = computed(() => {
-  if (!selectedPerson.value?.name) return ''
-  return extractSourceExcerpt(sourceText.value, selectedPerson.value.name)
+  const name = selectedPerson.value?.name
+  if (!name) return ''
+  return extractSourceExcerpt(sourceText.value, name)
 })
 
 const homeSessionsStore = ref(loadHomeSessionsStore())
@@ -125,80 +121,18 @@ const sessionLabel = computed(() => {
 })
 
 const messageCount = computed(() => messages.value.length)
-
 const hasFamily = computed(() => Boolean(props.family?.id))
 
 const selectedPerson = computed(() =>
   persons.value.find((p) => p.id === selectedPersonId.value) || null,
 )
 
-const personDraft = ref<Record<string, unknown> | null>(null)
-const personDraftPersonId = ref<string | null>(null)
-
-const PERSON_FIELDS: { key: string; label: string }[] = [
-  { key: 'name', label: '姓名' },
-  { key: 'courtesy_name', label: '字' },
-  { key: 'art_name', label: '号' },
-  { key: 'generation', label: '世代' },
-  { key: 'gender', label: '性别' },
-  { key: 'birth_year', label: '生年' },
-  { key: 'death_year', label: '卒年' },
-  { key: 'generation_name', label: '字辈' },
-  { key: 'county', label: '县' },
-  { key: 'town', label: '乡' },
-  { key: 'village', label: '村' },
-  { key: 'biography', label: '简介' },
-]
-
-const draftFieldKeys = computed(() => {
-  if (personDraftPersonId.value !== selectedPersonId.value || !personDraft.value) {
-    return new Set<string>()
-  }
-  return new Set(Object.keys(personDraft.value))
-})
-
-const displayPerson = computed(() => {
-  const p = selectedPerson.value
-  if (!p) return null
-  if (personDraftPersonId.value === p.id && personDraft.value) {
-    return { ...p, ...personDraft.value }
-  }
-  return p
-})
-
-function formatPersonFieldValue(key: string, value: unknown) {
-  if (value === null || value === undefined || value === '') return '—'
-  if (key === 'gender') {
-    if (value === 'male') return '男'
-    if (value === 'female') return '女'
-  }
-  return String(value)
-}
-
-function clearPersonDraft() {
-  personDraft.value = null
-  personDraftPersonId.value = null
-}
-
-function applyPersonPrefill(action: { person_id?: string; draft?: Record<string, unknown> }) {
-  if (!action.person_id) return
-  selectedPersonId.value = action.person_id
-  activeTab.value = 'person'
-  personDraftPersonId.value = action.person_id
-  personDraft.value = { ...(action.draft || {}) }
-}
-
 const visibleMessages = computed(() => messages.value)
 
-function triggerAgentPulse(tab?: TabId, personId?: string | null) {
-  if (tab) {
-    pulseTab.value = tab
-    window.setTimeout(() => { pulseTab.value = null }, 1800)
-  }
-  if (personId) {
-    pulsePersonId.value = personId
-    window.setTimeout(() => { pulsePersonId.value = null }, 1800)
-  }
+function triggerAgentPulse(tab?: TabId) {
+  if (!tab) return
+  pulseTab.value = tab
+  window.setTimeout(() => { pulseTab.value = null }, 1800)
 }
 
 function setAgentLinkHint(hints: string[]) {
@@ -233,7 +167,7 @@ async function clearChatHistory() {
     const res = await api('POST', `/families/${props.family.id}/agent/session/reset`, { mode: 'clear' })
     if (res.success) {
       messages.value = []
-      sessionId.value = res.session_id || sessionId.value
+      sessionId.value = res.session_id || null
     }
     return
   }
@@ -299,7 +233,7 @@ function ensureWelcome() {
 async function loadFamilyData() {
   if (!props.family?.id) {
     persons.value = []
-    treeNodes.value = []
+    relations.value = []
     sourceText.value = ''
     selectedPersonId.value = null
     anchorPersonId.value = null
@@ -308,16 +242,17 @@ async function loadFamilyData() {
   }
   loading.value = true
   try {
-    const [pRes, stateRes, treeRes] = await Promise.all([
+    const [pRes, relRes, stateRes] = await Promise.all([
       api('GET', `/families/${props.family.id}/persons`),
+      api('GET', `/families/${props.family.id}/relations`),
       api('GET', `/families/${props.family.id}/agent/state`),
-      api('GET', `/families/${props.family.id}/tree?style=silkworm`),
     ])
     persons.value = Array.isArray(pRes) ? pRes : []
-    treeNodes.value = treeRes.nodes || []
+    relations.value = Array.isArray(relRes) ? relRes : []
     sourceText.value = props.family.source_text || ''
     if (stateRes.success) {
-      activeTab.value = (stateRes.active_tab as TabId) || 'tree'
+      const tab = stateRes.active_tab as string
+      activeTab.value = tab === 'source' ? 'source' : 'tree'
       anchorPersonId.value = stateRes.anchor_person_id || null
       selectedPersonId.value = stateRes.selected_person_id || null
       sessionId.value = stateRes.session_id || null
@@ -326,33 +261,14 @@ async function loadFamilyData() {
     ensureWelcome()
     const entryCtx = popFamilyEntryContext(props.family.id)
     if (entryCtx) appendFamilyEntryBridge(entryCtx)
-    if (activeTab.value === 'tree') {
-      await nextTick()
-      await treeCanvasRef.value?.reload()
-    }
   } finally {
     loading.value = false
   }
 }
 
-const CLASSIC_ONLY_TABS: TabId[] = ['diff', 'organize']
-
 function switchTab(tab: TabId) {
   if (!hasFamily.value) return
-  if (CLASSIC_ONLY_TABS.includes(tab)) {
-    emit('switchClassic', tab)
-    return
-  }
   activeTab.value = tab
-  persistUiState()
-}
-
-function selectPerson(id: string) {
-  selectedPersonId.value = id
-  activeTab.value = 'person'
-  if (personDraftPersonId.value && personDraftPersonId.value !== id) {
-    clearPersonDraft()
-  }
   persistUiState()
 }
 
@@ -373,22 +289,26 @@ async function persistUiState() {
 function applyUiActions(actions: AgentUiAction[]) {
   const hints = applyGenealogyUiActions(actions, {
     switchTab: (tab) => {
-      if (tab === 'organize' || tab === 'diff') {
-        emit('switchClassic', tab)
+      if (tab === 'organize' || tab === 'diff' || tab === 'person') {
+        emit('switchClassic', tab === 'person' ? undefined : tab)
         return
       }
-      activeTab.value = tab as TabId
-      triggerAgentPulse(tab as TabId)
+      if (tab === 'source' || tab === 'tree') {
+        activeTab.value = tab
+        triggerAgentPulse(tab)
+      }
     },
     focusPerson: (personId, name) => {
       selectedPersonId.value = personId
-      activeTab.value = 'person'
-      triggerAgentPulse('person', personId)
-      if (name) agentLinkHint.value = `已定位【${name}】`
+      activeTab.value = 'tree'
+      triggerAgentPulse('tree')
+      if (name) agentLinkHint.value = `已选中【${name}】· 编辑请用经典模式`
     },
-    prefillPerson: (personId, draft) => {
-      applyPersonPrefill({ person_id: personId, draft })
-      triggerAgentPulse('person', personId)
+    prefillPerson: (personId, _draft) => {
+      selectedPersonId.value = personId
+      activeTab.value = 'tree'
+      agentLinkHint.value = '对话已提取资料 · 请在经典模式中编辑成员'
+      emit('switchClassic')
     },
     setAnchor: (personId, name) => {
       anchorPersonId.value = personId
@@ -444,7 +364,6 @@ async function respondConfirmation(token: string, approved: boolean) {
         messages.value.push({ role: 'assistant', content: res.message })
       }
     }
-    clearPersonDraft()
     if (approved) {
       await loadFamilyData()
       emit('refresh')
@@ -501,9 +420,7 @@ async function sendChat(text: string) {
       messages.value.push({ role: 'assistant', content: res.reply || '' })
     }
     await persistUiState()
-    if (activeTab.value === 'tree') {
-      await treeCanvasRef.value?.reload()
-    }
+    await loadFamilyData()
     emit('refresh')
   } finally {
     chatLoading.value = false
@@ -537,7 +454,6 @@ watch(() => props.family?.id, () => loadFamilyData(), { immediate: true })
           <button type="button" class="btn-back btn-back--inline" @click="emit('leaveFamily')">←</button>
           <h2 class="agent-top-bar-title">{{ family!.name }}</h2>
           <span v-if="family!.surname" class="surname-tag">{{ family!.surname }}氏</span>
-          <span class="agent-top-bar-agent-tag">身具智能</span>
         </template>
         <template v-else>
           <span class="logo-mark logo-mark--sm">{{ agent.icon }}</span>
@@ -564,22 +480,22 @@ watch(() => props.family?.id, () => loadFamilyData(), { immediate: true })
         >
           <option v-for="f in families" :key="f.id" :value="f.id">{{ f.name }}</option>
         </select>
-      <button
-        v-if="hasFamily"
-        type="button"
-        class="btn-secondary btn-sm agent-classic-btn"
-        @click="emit('switchClassic')"
-      >
-        经典编辑
-      </button>
-      <button
-        v-if="isCompact"
-        type="button"
-        class="btn-secondary btn-sm agent-topbar-chat-btn"
-        @click="toggleChatExpanded"
-      >
-        {{ chatExpanded ? '收起对话' : '展开对话' }}
-      </button>
+        <button
+          v-if="hasFamily"
+          type="button"
+          class="btn-secondary btn-sm agent-classic-btn"
+          @click="emit('switchClassic')"
+        >
+          经典编辑
+        </button>
+        <button
+          v-if="isCompact"
+          type="button"
+          class="btn-secondary btn-sm agent-topbar-chat-btn"
+          @click="toggleChatExpanded"
+        >
+          {{ chatExpanded ? '收起对话' : '展开对话' }}
+        </button>
         <button type="button" class="btn-icon" title="设置" @click="emit('settings')">⚙</button>
       </div>
     </header>
@@ -587,105 +503,96 @@ watch(() => props.family?.id, () => loadFamilyData(), { immediate: true })
     <div class="agent-shell-body">
       <div class="agent-shell-main">
         <div class="agent-page-area">
-        <!-- 未选族谱：列表在右侧工作区 -->
-        <div v-if="!hasFamily" class="agent-page agent-page--home">
-          <div class="agent-home-toolbar">
-            <h2 class="page-title">我的族谱</h2>
-            <button type="button" class="btn-primary btn-sm" @click="emit('createFamily')">+ 新建</button>
+          <div v-if="!hasFamily" class="agent-page agent-page--home">
+            <div class="agent-home-toolbar">
+              <h2 class="page-title">我的族谱</h2>
+              <button type="button" class="btn-primary btn-sm" @click="emit('createFamily')">+ 新建</button>
+            </div>
+            <div v-if="familiesLoading" class="loading">加载中…</div>
+            <div v-else-if="!families.length" class="empty-state compact">
+              <p>还没有族谱。在对话里说「扫描建谱」，或点新建。</p>
+            </div>
+            <div v-else class="family-grid family-grid--compact">
+              <article
+                v-for="f in families"
+                :key="f.id"
+                class="family-card family-card--selectable"
+                @click="emit('selectFamily', f.id)"
+              >
+                <div class="family-avatar">{{ familyInitial(f) }}</div>
+                <div class="family-info">
+                  <h3>{{ f.name }}</h3>
+                  <span class="count">{{ f.person_count || 0 }} 位成员</span>
+                </div>
+              </article>
+            </div>
           </div>
-          <div v-if="familiesLoading" class="loading">加载中…</div>
-          <div v-else-if="!families.length" class="empty-state compact">
-        <p>还没有族谱。在下方对话里说「扫描建谱」，或点新建。</p>
-          </div>
-          <div v-else class="family-grid family-grid--compact">
-            <article
-              v-for="f in families"
-              :key="f.id"
-              class="family-card family-card--selectable"
-              @click="emit('selectFamily', f.id)"
-            >
-              <div class="family-avatar">{{ familyInitial(f) }}</div>
-              <div class="family-info">
-                <h3>{{ f.name }}</h3>
-                <span class="count">{{ f.person_count || 0 }} 位成员</span>
-              </div>
-            </article>
-          </div>
-        </div>
 
-        <template v-else>
-          <div v-if="loading" class="agent-chat-loading">加载族谱…</div>
           <template v-else>
-            <header class="agent-workspace-header">
-              <div class="agent-workspace-header-main">
-                <span class="agent-workspace-tab-icon">{{ activeTabMeta.icon }}</span>
-                <h3 class="agent-workspace-title">{{ activeTabMeta.label }}</h3>
-                <span v-if="selectedPerson" class="agent-workspace-context">· {{ selectedPerson.name }}</span>
-              </div>
-              <p v-if="agentLinkHint" class="agent-workspace-hint">{{ agentLinkHint }}</p>
-            </header>
-
-            <div v-show="activeTab === 'tree'" class="agent-page agent-page--tree">
-              <GenealogyTreeCanvas
-                v-if="family?.id"
-                ref="treeCanvasRef"
-                :family-id="family.id"
-                :selected-person-id="selectedPersonId"
-                :pulse-person-id="pulsePersonId"
-                tree-style="silkworm"
-                @select="selectPersonFromTree"
-              />
-            </div>
-            <div v-show="activeTab === 'source'" class="agent-page">
-              <p class="hint">文字版（完整编辑请用「经典编辑」）</p>
-              <div v-if="sourceExcerpt" class="agent-source-excerpt">
-                <strong>原文节选 · {{ selectedPerson?.name }}</strong>
-                <p>{{ sourceExcerpt }}</p>
-              </div>
-              <textarea v-model="sourceText" class="input agent-source-text" readonly rows="10" />
-            </div>
-            <div v-show="activeTab === 'person'" class="agent-page">
-              <div v-if="!displayPerson" class="empty-state compact">
-                <p>点选树图成员，或在对话里描述资料（如「张三字子明第三世」）自动填入。</p>
-              </div>
-              <div v-else class="agent-person-card">
-                <div v-if="draftFieldKeys.size" class="agent-prefill-banner">
-                  智能体已从对话提取 {{ draftFieldKeys.size }} 项，核对后点对话卡片「确认写入」
+            <div v-if="loading" class="agent-chat-loading">加载族谱…</div>
+            <template v-else>
+              <header class="agent-workspace-header agent-workspace-header--tree">
+                <div class="agent-workspace-header-main">
+                  <span class="agent-workspace-tab-icon">{{ activeTabMeta.icon }}</span>
+                  <h3 class="agent-workspace-title">{{ activeTabMeta.label }}</h3>
+                  <span v-if="selectedPerson" class="agent-workspace-context">· {{ selectedPerson.name }}</span>
                 </div>
-                <h3>{{ displayPerson.name }}</h3>
-                <div class="agent-person-form">
-                  <div
-                    v-for="field in PERSON_FIELDS"
-                    :key="field.key"
-                    class="agent-field-row"
-                    :class="{ 'agent-field-row--draft': draftFieldKeys.has(field.key) }"
+                <div v-if="activeTab === 'tree'" class="ocr-view-mode-group agent-view-mode-group">
+                  <button
+                    type="button"
+                    class="ocr-view-mode-btn"
+                    :class="{ active: genealogyViewMode === 'page' }"
+                    @click="genealogyViewMode = 'page'"
                   >
-                    <label class="agent-field-label">{{ field.label }}</label>
-                    <span class="agent-field-value">
-                      {{ formatPersonFieldValue(field.key, displayPerson[field.key]) }}
-                    </span>
-                    <span v-if="draftFieldKeys.has(field.key)" class="agent-field-badge">待确认</span>
-                  </div>
+                    谱页
+                  </button>
+                  <button
+                    type="button"
+                    class="ocr-view-mode-btn"
+                    :class="{ active: genealogyViewMode === 'card' }"
+                    @click="genealogyViewMode = 'card'"
+                  >
+                    卡片
+                  </button>
+                </div>
+                <p v-if="agentLinkHint" class="agent-workspace-hint">{{ agentLinkHint }}</p>
+              </header>
+
+              <div v-show="activeTab === 'tree'" class="agent-page agent-page--tree">
+                <GenealogyReferenceView
+                  v-if="persons.length"
+                  :mode="genealogyViewMode"
+                  :persons="persons"
+                  :relations="relations"
+                  :structured-text="sourceText"
+                  :title="family?.name || '族谱'"
+                  :selected-person-id="selectedPersonId"
+                  fill
+                  @select="selectPersonFromTree"
+                />
+                <div v-else class="empty-state compact agent-tree-empty">
+                  <p>暂无成员。在对话里说「扫描建谱」，或进入经典编辑添加。</p>
+                  <button type="button" class="btn-secondary btn-sm" @click="emit('switchClassic')">经典编辑</button>
+                </div>
+                <div v-if="selectedPerson" class="agent-selection-bar">
+                  <span>已选 <strong>{{ selectedPerson.name }}</strong></span>
+                  <button type="button" class="btn-secondary btn-sm" @click="emit('switchClassic')">编辑成员</button>
                 </div>
               </div>
-            </div>
-            <div v-show="activeTab === 'diff'" class="agent-page agent-page--diff">
-              <div class="empty-state compact">
-                <p>对比页 Phase 2 接入对话；暂用「经典编辑」。</p>
-                <button type="button" class="btn-secondary btn-sm" @click="emit('switchClassic')">经典编辑</button>
+
+              <div v-show="activeTab === 'source'" class="agent-page agent-page--source">
+                <p class="hint">原文预览（完整三版编辑请用「经典编辑」→ 原文抽屉）</p>
+                <div v-if="sourceExcerpt" class="agent-source-excerpt">
+                  <strong v-if="selectedPerson">节选 · {{ selectedPerson.name }}</strong>
+                  <p>{{ sourceExcerpt }}</p>
+                </div>
+                <textarea v-model="sourceText" class="input agent-source-text" readonly rows="12" />
               </div>
-            </div>
-            <div v-show="activeTab === 'organize'" class="agent-page agent-page--organize">
-              <div class="empty-state compact">
-                <p>整理页 Phase 2 接入对话；暂用「经典编辑」。</p>
-                <button type="button" class="btn-secondary btn-sm" @click="emit('switchClassic')">经典编辑</button>
-              </div>
-            </div>
+            </template>
           </template>
-        </template>
         </div>
 
-        <nav v-if="hasFamily" class="agent-tab-bar">
+        <nav v-if="hasFamily" class="agent-tab-bar agent-tab-bar--minimal">
           <button
             v-for="t in TABS"
             :key="t.id"

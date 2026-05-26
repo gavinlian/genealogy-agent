@@ -1074,6 +1074,7 @@ select.input { cursor: pointer; }
   background: rgba(139, 111, 71, 0.04);
   border-radius: var(--radius-sm);
 }
+
 .name-highlight {
   background: rgba(201, 169, 97, 0.35);
   color: var(--color-primary);
@@ -1398,6 +1399,119 @@ select.input { cursor: pointer; }
   flex-direction: column;
   min-height: 0;
   background: var(--color-bg);
+}
+
+.workspace-canvas--reference {
+  background: var(--color-bg-muted);
+}
+
+.workspace-canvas--reference .canvas-toolbar--reference {
+  justify-content: space-between;
+}
+
+.workspace-canvas--reference .canvas-stats-hint {
+  margin: 0;
+  font-size: 12px;
+}
+
+.workspace-reference-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.genealogy-reference-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 8px 10px 12px;
+}
+
+.genealogy-reference-view--fill {
+  flex: 1;
+  min-height: 0;
+}
+
+.genealogy-reference-view--fill .zupu-card-view,
+.genealogy-reference-view--fill .zupu-page-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.genealogy-reference-view--fill .zupu-card-view-scroll,
+.genealogy-reference-view--fill .zupu-page-view-scroll {
+  max-height: none;
+  flex: 1;
+  min-height: 160px;
+}
+
+.zupu-page-name-node {
+  cursor: pointer;
+}
+
+.genealogy-reference-view--unbounded {
+  padding: 0;
+  flex: none;
+}
+
+.genealogy-reference-view--unbounded .zupu-card-view,
+.genealogy-reference-view--unbounded .zupu-page-view {
+  flex: none;
+}
+
+.zupu-card-view-scroll--unbounded,
+.zupu-page-view-scroll--unbounded {
+  max-height: none !important;
+  overflow: visible !important;
+  flex: none !important;
+}
+
+.ref-zoom-viewport {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  position: relative;
+  cursor: grab;
+  background: var(--color-bg-muted);
+  -webkit-overflow-scrolling: touch;
+  user-select: none;
+}
+
+.ref-zoom-viewport.panning {
+  cursor: grabbing;
+}
+
+.ref-zoom-inner {
+  transform-origin: 0 0;
+  will-change: transform;
+  display: inline-block;
+  min-width: min-content;
+}
+
+.ref-zoom-hint {
+  position: sticky;
+  left: 8px;
+  bottom: 0;
+  margin: 0;
+  padding: 6px 10px;
+  font-size: 11px;
+  color: var(--color-text-muted);
+  pointer-events: none;
+  width: fit-content;
+}
+
+.workspace-canvas--reference .canvas-toolbar--reference {
+  gap: 10px;
+}
+
+.workspace-canvas--reference .canvas-zoom-label {
+  display: inline-block;
 }
 
 .canvas-toolbar {
@@ -1875,7 +1989,11 @@ select.input { cursor: pointer; }
   .canvas-toolbar .btn-xs[title="重置"] {
     display: none;
   }
-  .canvas-touch-controls {
+  .workspace-canvas--reference {
+    position: relative;
+  }
+
+  .workspace-canvas--reference .canvas-touch-controls {
     position: absolute;
     right: 12px;
     bottom: calc(12px + env(safe-area-inset-bottom, 0px));
@@ -2090,6 +2208,478 @@ select.input { cursor: pointer; }
   display: flex;
   gap: 8px;
   margin-top: 8px;
+}
+
+/* 原文查看：参考族谱 App（docs/reference/zupu-mobile） */
+.ocr-view-toolbar {
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.ocr-view-mode-group {
+  display: inline-flex;
+  padding: 3px;
+  gap: 2px;
+  background: #ebe3d4;
+  border-radius: 8px;
+  border: 1px solid #d4c4a8;
+}
+
+.ocr-view-mode-btn {
+  border: none;
+  background: transparent;
+  padding: 7px 14px;
+  font-size: 13px;
+  border-radius: 6px;
+  color: #6b5638;
+  cursor: pointer;
+}
+
+.ocr-view-mode-btn.active {
+  background: #fff;
+  color: #8b4513;
+  font-weight: 600;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1);
+}
+
+.zupu-view-empty {
+  padding: 28px 16px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--color-text-muted);
+  line-height: 1.6;
+}
+
+/* 参考图 1 · 卡片世代 */
+.zupu-card-view {
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background:
+    linear-gradient(180deg, rgba(247, 240, 227, 0.92), rgba(237, 228, 211, 0.96)),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120' viewBox='0 0 120 120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)' opacity='0.06'/%3E%3C/svg%3E");
+  border: 1px solid #d9c9a8;
+}
+
+.zupu-card-view-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.45);
+  border-bottom: 1px solid rgba(139, 111, 71, 0.15);
+}
+
+.zupu-card-view-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  color: #4a3728;
+}
+
+.zupu-card-view-meta {
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+.zupu-card-view-scroll {
+  overflow: auto;
+  max-height: min(56dvh, 460px);
+  -webkit-overflow-scrolling: touch;
+}
+
+.zupu-card-view-canvas {
+  position: relative;
+  min-height: 200px;
+}
+
+.zupu-card-view-edges {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.zupu-edge {
+  stroke: rgba(255, 255, 255, 0.95);
+  stroke-width: 2;
+}
+
+.zupu-edge--bus {
+  stroke: rgba(255, 255, 255, 0.85);
+  stroke-width: 2;
+}
+
+.zupu-card-view-sidebar {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.04);
+  border-right: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.zupu-gen-sidebar-label {
+  position: absolute;
+  left: 0;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  writing-mode: vertical-rl;
+  font-size: 11px;
+  font-weight: 700;
+  color: #5c4a32;
+  letter-spacing: 0.1em;
+}
+
+.zupu-card-view-main {
+  position: relative;
+}
+
+.zupu-card-row {
+  position: absolute;
+  left: 0;
+  right: 0;
+}
+
+.zupu-card-unit {
+  position: absolute;
+  top: 0;
+  display: flex;
+  gap: 14px;
+}
+
+.zupu-person-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 6px 10px;
+  border: 2px solid #e8dcc8;
+  border-radius: 2px;
+  background: linear-gradient(180deg, #fffefb, #faf6ef);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.8),
+    0 2px 8px rgba(92, 74, 50, 0.12);
+  cursor: pointer;
+  position: relative;
+}
+
+.zupu-person-card::before {
+  content: '';
+  position: absolute;
+  inset: 3px;
+  border: 1px solid rgba(201, 169, 97, 0.35);
+  pointer-events: none;
+}
+
+.zupu-person-card--male { color: #3d5a80; }
+.zupu-person-card--female { color: #b85c38; }
+.zupu-person-card--unknown { color: #8b6f47; }
+
+.zupu-person-card--selected {
+  box-shadow: 0 0 0 2px #c9a961, 0 4px 14px rgba(139, 111, 71, 0.25);
+}
+
+.zupu-person-card-avatar {
+  width: 42px;
+  height: 50px;
+  display: block;
+}
+
+.zupu-person-card-name {
+  writing-mode: vertical-rl;
+  font-family: "Songti SC", "STSong", serif;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: inherit;
+}
+
+/* 参考图 2 · 谱页世系 */
+.zupu-page-view {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.zupu-page-view-scan img {
+  width: 100%;
+  max-height: 100px;
+  object-fit: contain;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+}
+
+.zupu-page-view-frame {
+  border: 2px solid #c9a961;
+  border-radius: var(--radius-md);
+  background:
+    linear-gradient(180deg, rgba(255, 252, 245, 0.95), rgba(248, 240, 224, 0.98)),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120' viewBox='0 0 120 120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)' opacity='0.05'/%3E%3C/svg%3E");
+  overflow: hidden;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.5);
+}
+
+.zupu-page-view-header {
+  display: flex;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(201, 169, 97, 0.35);
+  background: rgba(255, 255, 255, 0.35);
+}
+
+.zupu-page-view-title {
+  font-family: "Songti SC", "STSong", serif;
+  font-weight: 700;
+  color: #4a3728;
+}
+
+.zupu-page-view-meta {
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+.zupu-page-view-scroll {
+  overflow: auto;
+  max-height: min(56dvh, 460px);
+  -webkit-overflow-scrolling: touch;
+}
+
+.zupu-page-name-node--selected {
+  background: rgba(201, 169, 97, 0.22);
+  border-radius: 4px;
+  box-shadow: 0 0 0 2px rgba(201, 169, 97, 0.55);
+}
+
+.zupu-page-view-canvas-wrap {
+  position: relative;
+  padding: 12px 8px 16px;
+  padding-right: 0;
+}
+
+.zupu-page-gutter {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  z-index: 2;
+  border-left: 1px solid rgba(42, 33, 24, 0.2);
+}
+
+.zupu-page-nodes,
+.zupu-page-edges {
+  padding-right: 52px;
+  box-sizing: border-box;
+}
+
+.zupu-page-edges {
+  position: absolute;
+  left: 0;
+  top: 0;
+  inset: 0;
+  pointer-events: none;
+}
+
+.zupu-page-nodes {
+  position: relative;
+  z-index: 1;
+}
+
+.zupu-card-view-main {
+  position: relative;
+  min-height: 100%;
+}
+
+.zupu-gen-sidebar-label {
+  align-items: center;
+  padding-top: 6px;
+}
+
+.zupu-page-edge {
+  stroke: #2a2118;
+  stroke-width: 1.5;
+  fill: none;
+}
+
+.zupu-page-node-dot {
+  fill: #fff;
+  stroke: #2a2118;
+  stroke-width: 1.5;
+}
+
+.zupu-page-gutter-title {
+  position: absolute;
+  top: 0;
+  right: 6px;
+  writing-mode: vertical-rl;
+  font-size: 12px;
+  font-weight: 700;
+  color: #4a3728;
+  letter-spacing: 0.2em;
+}
+
+.zupu-page-gen-badge {
+  position: absolute;
+  right: 2px;
+  padding: 6px 4px;
+  background: #1a1a1a;
+  color: #fff;
+  font-size: 11px;
+  writing-mode: vertical-rl;
+  border-radius: 4px;
+  letter-spacing: 0.08em;
+}
+
+.zupu-page-nodes {
+  position: relative;
+}
+
+.zupu-page-name-node {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.zupu-page-name-vertical {
+  writing-mode: vertical-rl;
+  text-orientation: upright;
+  font-family: "Songti SC", "STSong", serif;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  color: #2a2118;
+}
+
+.zupu-page-view-footer {
+  padding: 8px 12px;
+  border-top: 1px solid rgba(201, 169, 97, 0.25);
+  text-align: center;
+}
+
+.zupu-page-footer-hint {
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+
+@media (max-width: 768px) {
+  .ocr-view-mode-group {
+    width: 100%;
+    justify-content: stretch;
+  }
+  .ocr-view-mode-btn {
+    flex: 1;
+    text-align: center;
+    padding: 10px 8px;
+  }
+  .zupu-card-view-scroll,
+  .zupu-page-view-scroll {
+    max-height: min(62dvh, 520px);
+  }
+}
+
+.ocr-version-tabs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.ocr-version-tab {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: #fff;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.ocr-version-tab.active {
+  border-color: var(--color-primary);
+  background: #faf6ef;
+  color: var(--color-primary);
+  font-weight: 600;
+}
+
+.ocr-version-hint {
+  margin: 0 0 10px;
+  font-size: 12px;
+}
+
+.ocr-describing-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  font-size: 13px;
+  color: var(--color-primary);
+  background: #faf6ef;
+  border: 1px solid #e8dcc8;
+  border-radius: var(--radius-md);
+}
+
+.ocr-describing-placeholder {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 200px;
+  padding: 16px;
+  font-size: 13px;
+  color: var(--color-text-muted);
+  background: #f8f8f5;
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.ocr-describing-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid #e8dcc8;
+  border-top-color: var(--color-primary);
+  border-radius: 50%;
+  animation: ocr-spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes ocr-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.ocr-describing-placeholder-compact {
+  min-height: 72px;
+  margin-bottom: 12px;
+}
+
+.ocr-version-textarea {
+  width: 100%;
+  min-height: 280px;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.55;
+  resize: vertical;
+}
+
+.source-version-diff-summary {
+  margin: 8px 0 4px;
+}
+
+.source-version-diff-pre {
+  max-height: 160px;
+  overflow: auto;
+  padding: 8px 10px;
+  margin: 0 0 8px;
+  font-size: 11px;
+  line-height: 1.45;
+  background: #f8f8f5;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+  white-space: pre-wrap;
 }
 
 /* AI 对话整理主谱 */
@@ -2728,42 +3318,43 @@ select.input { cursor: pointer; }
 .agent-tree-node .node-name { font-weight: 600; font-size: 14px; }
 .agent-tree-node .node-gen { font-size: 11px; color: var(--color-text-muted); }
 .agent-source-text { width: 100%; min-height: 200px; font-size: 13px; }
-.agent-person-card { background: #fff; padding: 16px; border-radius: var(--radius-md); border: 1px solid var(--color-border); }
-.agent-person-card h3 { margin: 0 0 8px; }
-.agent-prefill-banner {
-  margin-bottom: 12px;
-  padding: 8px 10px;
-  border-radius: var(--radius-sm);
-  background: #fff8e6;
-  border: 1px solid #f0d78c;
-  color: #7a5c00;
-  font-size: 13px;
-  line-height: 1.45;
-}
-.agent-person-form { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
-.agent-field-row {
-  display: grid;
-  grid-template-columns: 72px 1fr auto;
-  gap: 8px;
+
+.agent-workspace-header--tree {
+  flex-wrap: wrap;
+  gap: 8px 12px;
   align-items: center;
-  padding: 6px 8px;
-  border-radius: var(--radius-sm);
-  background: #fafafa;
 }
-.agent-field-row--draft {
-  background: #fffbeb;
-  border: 1px solid #f5e6a8;
+
+.agent-view-mode-group {
+  margin-left: auto;
 }
-.agent-field-label { font-size: 13px; color: var(--color-text-muted); }
-.agent-field-value { font-size: 14px; word-break: break-word; }
-.agent-field-badge {
-  font-size: 11px;
-  padding: 2px 6px;
-  border-radius: 999px;
-  background: #fef3c7;
-  color: #92400e;
-  white-space: nowrap;
+
+.agent-selection-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--color-border);
+  background: rgba(255, 255, 255, 0.92);
+  font-size: 13px;
 }
+
+.agent-page--tree {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.agent-tree-empty {
+  padding: 24px 16px;
+  text-align: center;
+}
+
+.agent-tab-bar--minimal {
+  border-top: 1px solid var(--color-border);
+}
+
 .agent-bio { font-size: 13px; line-height: 1.5; color: var(--color-text-muted); white-space: pre-wrap; }
 
 /* 左侧对话栏布局 */

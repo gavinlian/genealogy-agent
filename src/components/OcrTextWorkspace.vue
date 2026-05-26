@@ -16,6 +16,10 @@ import {
   PERSON_NAME_MAX_LEN,
 } from '../utils/personName'
 import { API_BASE } from '../main'
+import GenealogyCardTreeView from './view/GenealogyCardTreeView.vue'
+import SourceSilkwormPageView from './view/SourceSilkwormPageView.vue'
+
+export type SourceViewMode = 'page' | 'card' | 'edit'
 
 const props = withDefaults(
   defineProps<{
@@ -24,12 +28,20 @@ const props = withDefaults(
     imagePreview?: string
     compact?: boolean
     relationLinkFrom?: string | null
+    previewPersons?: any[]
+    previewRelations?: any[]
+    structuredText?: string
+    viewTitle?: string
   }>(),
   {
     annotations: () => [],
     imagePreview: '',
     compact: false,
     relationLinkFrom: null,
+    previewPersons: () => [],
+    previewRelations: () => [],
+    structuredText: '',
+    viewTitle: '族谱',
   },
 )
 
@@ -46,6 +58,7 @@ const textareaRef = ref<HTMLTextAreaElement | null>(null)
 const aiLoading = ref(false)
 const copyHint = ref('')
 const selectionHint = ref('')
+const viewMode = ref<SourceViewMode>('page')
 const dragOverTray = ref(false)
 const selectedRange = ref<{ start: number; end: number; text: string } | null>(null)
 
@@ -236,60 +249,77 @@ function removeAnnotation(id: string) {
 
 <template>
   <div class="ocr-text-workspace" :class="{ compact }">
-    <div v-if="imagePreview" class="ocr-text-image">
+    <div v-if="imagePreview && viewMode === 'edit'" class="ocr-text-image">
       <img :src="imagePreview" alt="扫描原图" />
     </div>
 
     <div class="ocr-text-main">
-      <div class="ocr-text-toolbar">
-        <button type="button" class="btn-xs" @click="copyAllText">
-          {{ copyHint || '复制全文' }}
-        </button>
-        <button
-          type="button"
-          class="btn-xs btn-primary"
-          :disabled="!canMarkSelection"
-          @click="markSelectionAsName"
-        >
-          变为姓名标签
-        </button>
-        <button type="button" class="btn-xs" :disabled="aiLoading || !localText.trim()" @click="aiExtractNames">
-          {{ aiLoading ? 'AI 识别中…' : 'AI 识别人名' }}
-        </button>
-        <span v-if="selectionHint" class="ocr-text-hint">{{ selectionHint }}</span>
+      <div class="ocr-text-toolbar ocr-view-toolbar">
+        <div class="ocr-view-mode-group" role="tablist" aria-label="查看模式">
+          <button type="button" role="tab" class="ocr-view-mode-btn" :class="{ active: viewMode === 'page' }" @click="viewMode = 'page'">谱页</button>
+          <button type="button" role="tab" class="ocr-view-mode-btn" :class="{ active: viewMode === 'card' }" @click="viewMode = 'card'">卡片</button>
+          <button type="button" role="tab" class="ocr-view-mode-btn" :class="{ active: viewMode === 'edit' }" @click="viewMode = 'edit'">编辑</button>
+        </div>
+        <template v-if="viewMode === 'edit'">
+          <button type="button" class="btn-xs" @click="copyAllText">{{ copyHint || '复制全文' }}</button>
+          <button type="button" class="btn-xs btn-primary" :disabled="!canMarkSelection" @click="markSelectionAsName">变为姓名标签</button>
+          <button type="button" class="btn-xs" :disabled="aiLoading || !localText.trim()" @click="aiExtractNames">{{ aiLoading ? 'AI 识别中…' : 'AI 识别人名' }}</button>
+        </template>
+        <span v-if="viewMode === 'edit' && selectionHint" class="ocr-text-hint">{{ selectionHint }}</span>
       </div>
-      <p class="ocr-text-tip">提示：可选 1–4 字 — 两字全名（姓+单字名如「王五」）、单字名、或复姓；双击或点「变为姓名标签」</p>
 
-      <textarea
-        ref="textareaRef"
-        v-model="localText"
-        class="ocr-text-editor"
-        placeholder="OCR 文字可编辑。可选 1–4 字：两字姓名（如王五）、单字名、复姓；选中后双击标注。"
-        spellcheck="false"
-        @mouseup="readSelection"
-        @keyup="readSelection"
-        @dblclick="onTextareaDblClick"
+      <SourceSilkwormPageView
+        v-if="viewMode === 'page'"
+        :persons="previewPersons"
+        :relations="previewRelations"
+        :structured-text="structuredText"
+        :raw-text="localText"
+        :image-preview="imagePreview"
+        :title="viewTitle"
       />
 
-      <div v-if="textSegments.length" class="ocr-text-preview">
-        <div class="ocr-text-preview-label">标注预览（高亮姓名可拖动）</div>
-        <div class="ocr-text-preview-body">
-          <template v-for="seg in textSegments" :key="seg.key">
-            <mark
-              v-if="seg.type === 'name'"
-              class="name-highlight name-highlight-draggable"
-              draggable="true"
-              :title="'拖动「' + seg.text + '」到族谱'"
-              @dragstart="onMarkDragStart($event, seg.annotationId)"
-              @click="onMarkClick(seg.annotationId)"
-            >{{ seg.text }}</mark>
-            <span v-else>{{ seg.text }}</span>
-          </template>
+      <GenealogyCardTreeView
+        v-else-if="viewMode === 'card'"
+        :persons="previewPersons"
+        :relations="previewRelations"
+        :structured-text="structuredText"
+        :raw-text="localText"
+        :title="viewTitle"
+      />
+
+      <template v-else>
+        <p class="ocr-text-tip">提示：可选 1–4 字 — 两字全名（姓+单字名如「王五」）、单字名、或复姓；双击或点「变为姓名标签」</p>
+        <textarea
+          ref="textareaRef"
+          v-model="localText"
+          class="ocr-text-editor"
+          placeholder="OCR 文字可编辑。可选 1–4 字：两字姓名（如王五）、单字名、复姓；选中后双击标注。"
+          spellcheck="false"
+          @mouseup="readSelection"
+          @keyup="readSelection"
+          @dblclick="onTextareaDblClick"
+        />
+        <div v-if="textSegments.length" class="ocr-text-preview">
+          <div class="ocr-text-preview-label">标注预览（高亮姓名可拖动）</div>
+          <div class="ocr-text-preview-body">
+            <template v-for="seg in textSegments" :key="seg.key">
+              <mark
+                v-if="seg.type === 'name'"
+                class="name-highlight name-highlight-draggable"
+                draggable="true"
+                :title="'拖动「' + seg.text + '」到族谱'"
+                @dragstart="onMarkDragStart($event, seg.annotationId)"
+                @click="onMarkClick(seg.annotationId)"
+              >{{ seg.text }}</mark>
+              <span v-else>{{ seg.text }}</span>
+            </template>
+          </div>
         </div>
-      </div>
+      </template>
     </div>
 
     <div
+      v-if="viewMode === 'edit'"
       class="ocr-name-tray"
       :class="{ 'drag-over': dragOverTray }"
       @dragover="onTrayDragOver"
@@ -301,9 +331,7 @@ function removeAnnotation(id: string) {
         <span class="hint">{{ uniqueNames.length }} 个</span>
         <span v-if="relationLinkFrom" class="link-mode-badge">连线中：{{ relationLinkFrom }}</span>
       </div>
-      <div v-if="!uniqueNames.length" class="ocr-name-tray-empty">
-        选中文字生成标签，或使用 AI 识别人名
-      </div>
+      <div v-if="!uniqueNames.length" class="ocr-name-tray-empty">选中文字生成标签，或使用 AI 识别人名</div>
       <div v-else class="ocr-name-chips">
         <button
           v-for="ann in uniqueNames"

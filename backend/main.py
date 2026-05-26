@@ -19,7 +19,7 @@ from agent.minimax_client import (
     call_minimax_chat,
     call_minimax_vlm,
 )
-from agent.pipeline import run_scan_pipeline, PARSE_PROMPT_TEMPLATE
+from agent.pipeline import run_scan_pipeline, run_ocr_only, PARSE_PROMPT_TEMPLATE
 from agent.genealogy_prompts import OCR_PROMPT, build_legacy_parse_prompt
 from agent.two_stage_parse import run_two_stage_genealogy_parse
 from agent.genealogy_builder import auto_build_genealogy
@@ -93,11 +93,20 @@ from source_versions import (
     list_source_versions,
     migrate_legacy_family_source,
     get_active_source_for_family,
+    get_digitize_source_for_family,
+    save_ocr_scan_versions,
+    find_version_by_kind,
     set_active_source_version,
     delete_source_version,
     update_source_version,
     upsert_text_edition_from_source,
+    upsert_version_by_kind,
+    VERSION_KIND_OCR_RAW,
+    VERSION_KIND_RELATION_DESC,
+    VERSION_KIND_CUSTOM,
 )
+from source_version_diff import compare_source_texts
+from agent.genealogy_prompts import build_relation_describe_prompt
 from agent.relation_text import build_local_relation_description
 from agent.name_extractor import normalize_person_name
 
@@ -1078,6 +1087,7 @@ async def post_family_source_version(family_id: str, data: dict):
     migrate_legacy_family_source(c, family_id)
     version_no = data.get("version_no")
     label = data.get("label")
+    version_kind = data.get("version_kind") or VERSION_KIND_CUSTOM
     if not label and version_no:
         label = f"第{version_no}版"
     vid = create_source_version(
@@ -1087,6 +1097,7 @@ async def post_family_source_version(family_id: str, data: dict):
         label=label,
         status=data.get("status") or "draft",
         note=data.get("note"),
+        version_kind=version_kind,
         set_active=bool(data.get("set_active")),
     )
     conn.commit()
@@ -1175,6 +1186,135 @@ async def preview_text_edition(family_id: str, data: dict | None = None):
         "relation_text": relation_text,
         "source_version_id": src.get("id"),
         "source_version_label": src.get("label"),
+    }
+
+
+@app.post("/api/families/{family_id}/source-versions/save-ocr-pipeline")
+async def save_ocr_pipeline_versions(family_id: str, data: dict):
+    """OCR 扫描入库：版本一 OCR 原文 + 版本二 关系描述 + 可选版本三 用户修正。"""
+    conn = get_db()
+    c = conn.cursor()
+    family = c.execute("SELECT id FROM families WHERE id = ?", (family_id,)).fetchone()
+    if not family:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Family not found")
+
+    try:
+        result = save_ocr_scan_versions(
+            c,
+            family_id,
+            ocr_text=data.get("ocr_text") or data.get("source_text") or "",
+            relation_description=data.get("relation_description") or "",
+            custom_text=data.get("custom_text") or "",
+            source_annotations=data.get("source_annotations"),
+            image_path=data.get("image_path"),
+            layout_hint=data.get("layout_hint") or "horizontal_ltr",
+            active_kind=data.get("active_kind") or VERSION_KIND_RELATION_DESC,
+        )
+    except ValueError as exc:
+        conn.close()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    conn.commit()
+    row = c.execute("SELECT * FROM families WHERE id = ?", (family_id,)).fetchone()
+    conn.close()
+    return {"success": True, **result, "family": dict(row)}
+
+
+@app.post("/api/families/{family_id}/source-versions/regenerate-relation-desc")
+async def regenerate_relation_description(family_id: str, data: dict | None = None):
+    """用 AI 从版本一 OCR 原文重新生成版本二 关系描述稿。"""
+    data = data or {}
+    conn = get_db()
+    c = conn.cursor()
+    family = c.execute("SELECT id FROM families WHERE id = ?", (family_id,)).fetchone()
+    if not family:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Family not found")
+
+    raw = (data.get("ocr_text") or "").strip()
+    v1 = find_version_by_kind(c, family_id, VERSION_KIND_OCR_RAW)
+    if not raw and v1:
+        raw = (v1.get("source_text") or "").strip()
+    if not raw:
+        conn.close()
+        raise HTTPException(status_code=400, detail="请先保存或提供版本一 OCR 原文")
+
+    parse_provider, parse_model = resolve_task_model(data, "parse")
+    prompt = build_relation_describe_prompt(raw)
+    content, err = await call_text_model(parse_provider, parse_model, prompt)
+    relation_text = (content or "").strip()
+    if not relation_text or len(relation_text) < 4:
+        conn.close()
+        raise HTTPException(status_code=502, detail=err or "AI 未能生成关系描述稿")
+
+    v1_id = v1["id"] if v1 else None
+    if not v1_id:
+        v1_row = upsert_version_by_kind(
+            c, family_id, VERSION_KIND_OCR_RAW,
+            source_text=raw, status="confirmed",
+        )
+        v1_id = v1_row["id"]
+
+    v2 = upsert_version_by_kind(
+        c, family_id, VERSION_KIND_RELATION_DESC,
+        source_text=relation_text,
+        parent_version_id=v1_id,
+        status="draft",
+        set_active=True,
+    )
+    conn.commit()
+    payload = list_source_versions(c, family_id)
+    conn.close()
+    return {
+        "success": True,
+        "relation_description": relation_text,
+        "version": v2,
+        **payload,
+    }
+
+
+@app.get("/api/families/{family_id}/source-versions/compare")
+async def compare_source_versions_api(
+    family_id: str,
+    from_id: str | None = None,
+    to_id: str | None = None,
+):
+    """对比两个原文版本（常用于版本二 vs 版本三）。"""
+    conn = get_db()
+    c = conn.cursor()
+    payload = list_source_versions(c, family_id)
+    versions = payload.get("versions") or []
+    conn.close()
+
+    def _pick(vid: str | None, kind: str | None = None) -> dict | None:
+        if vid:
+            return next((v for v in versions if v["id"] == vid), None)
+        if kind:
+            matches = [v for v in versions if v.get("version_kind") == kind]
+            return matches[-1] if matches else None
+        return None
+
+    va = _pick(from_id, VERSION_KIND_RELATION_DESC)
+    vb = _pick(to_id, VERSION_KIND_CUSTOM)
+    if not va and versions:
+        va = versions[0]
+    if not vb and len(versions) > 1:
+        vb = versions[-1]
+    if not va or not vb:
+        raise HTTPException(status_code=400, detail="需要两个可比较的版本")
+
+    diff = compare_source_texts(
+        va.get("source_text") or "",
+        vb.get("source_text") or "",
+        label_a=va.get("label") or "版本 A",
+        label_b=vb.get("label") or "版本 B",
+    )
+    return {
+        "success": True,
+        "from_version": va,
+        "to_version": vb,
+        "diff": diff,
     }
 
 
@@ -1993,7 +2133,7 @@ def _resolve_family_source_text(
         version = get_source_version(cursor, family_id, source_version_id)
         if version and (version.get("source_text") or "").strip():
             return version["source_text"], version
-    return get_active_source_for_family(cursor, family_id)
+    return get_digitize_source_for_family(cursor, family_id)
 
 
 @app.post("/api/families/{family_id}/sync-person-details")
@@ -2664,7 +2804,7 @@ async def family_agent_chat(family_id: str, data: dict):
         p["spouse_id"] = get_spouse_id(c, p["id"])
     relations = [dict(r) for r in rel_rows]
 
-    source_text, _ = get_active_source_for_family(c, family_id)
+    source_text, _ = get_digitize_source_for_family(c, family_id)
     source_text = (source_text or "").strip()
 
     def excerpt_for(pid: str) -> str:
@@ -2996,7 +3136,7 @@ async def ai_organize_family(family_id: str, data: dict):
                 [dict(r) for r in persons_rows],
             )
             # 插入(merge) 与 替换(replace) 由前端 apply_mode 决定；不因 clean_slate 强制删人
-            source_text, _ = get_active_source_for_family(c, family_id)
+            source_text, _ = get_digitize_source_for_family(c, family_id)
             source_text = (source_text or "").strip()
             if not source_text:
                 fr = c.execute("SELECT source_text FROM families WHERE id = ?", (family_id,)).fetchone()
@@ -3094,7 +3234,7 @@ async def ai_organize_family(family_id: str, data: dict):
         else:
             source_text = (data.get("source_text") or "").strip()
         if not source_text:
-            source_text, source_version = get_active_source_for_family(c, family_id)
+            source_text, source_version = get_digitize_source_for_family(c, family_id)
             source_text = (source_text or "").strip()
         if not source_text:
             source_text = (family.get("source_text") or "").strip()
@@ -3188,7 +3328,7 @@ async def ai_organize_family(family_id: str, data: dict):
         apply_mode = (data.get("apply_mode") or "merge").strip().lower()
         if apply_mode not in ("merge", "replace"):
             apply_mode = "merge"
-        persist_source, _ = get_active_source_for_family(c, family_id)
+        persist_source, _ = get_digitize_source_for_family(c, family_id)
         persist_source = (persist_source or "").strip()
         if not persist_source:
             fr = c.execute("SELECT source_text FROM families WHERE id = ?", (family_id,)).fetchone()
@@ -3239,6 +3379,23 @@ async def agent_validate(data: dict):
         "relations": rv,
         "generation_issues": [i for i in pv.get("issues", []) if i.get("field") in ("generation", "birth_year")],
     }
+
+
+@app.post("/api/agent/scan-ocr")
+async def agent_scan_ocr(data: dict):
+    """扫描建谱 · 第一步：仅 OCR，返回版本一原文。"""
+    image_base64 = data.get("image")
+    ocr_provider, ocr_model = resolve_task_model(data, "ocr")
+
+    async def ocr_fn(provider, model, img, prompt):
+        return await call_vision_model(provider, model, img, prompt)
+
+    return await run_ocr_only(
+        image_base64,
+        ocr_provider=ocr_provider,
+        ocr_model=ocr_model,
+        ocr_fn=ocr_fn,
+    )
 
 
 @app.post("/api/agent/scan")
@@ -3346,6 +3503,7 @@ async def ocr_parse(data: dict):
 
     parse_provider, parse_model = resolve_task_model(data, "parse")
     skip_describe = bool(data.get("skip_describe"))
+    relation_override = (data.get("relation_text") or "").strip() or None
 
     async def parse_fn(prompt: str) -> tuple[str, str]:
         return await call_text_model(parse_provider, parse_model, prompt, max_tokens=8192)
@@ -3353,7 +3511,8 @@ async def ocr_parse(data: dict):
     parsed = await run_two_stage_genealogy_parse(
         raw_text,
         parse_fn,
-        skip_describe=skip_describe,
+        skip_describe=skip_describe or bool(relation_override),
+        relation_text_override=relation_override,
     )
 
     out = {
