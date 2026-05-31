@@ -1,5 +1,5 @@
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, HTTPException, Query, Header, Body
+from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List
@@ -69,7 +69,7 @@ from agent.organize_session import (
     resolve_context_mode,
     touch_organize_session,
 )
-from agent.source_diff import compare_genealogy_with_source, compare_parsed_with_genealogy
+from agent.smart_suggest import build_smart_suggest_from_source
 from genealogy_clear import clear_family_genealogy
 from agent.parser import parse_genealogy_text, extract_json_content
 from agent.validators import validate_genealogy_persons, validate_relations, validate_genealogy_with_generations
@@ -77,7 +77,9 @@ from agent.tree import build_family_tree
 from agent.generation_engine import recalculate_generations, add_person_with_kinship, kinship_generation_delta
 from agent.search import search_persons
 from agent.nl_search import nl_search_with_ai, rule_based_nl_search
+from agent.pdf_scan import run_pdf_ocr_pipeline
 from agent.pdf_export import generate_genealogy_html
+from pdf_import import get_pdf_info, normalize_pdf_base64
 from agent.review import annotate_persons_for_review
 from agent.person_editor import (
     apply_person_relations,
@@ -96,6 +98,7 @@ from source_versions import (
     get_digitize_source_for_family,
     save_ocr_scan_versions,
     find_version_by_kind,
+    attach_source_image,
     set_active_source_version,
     delete_source_version,
     update_source_version,
@@ -106,11 +109,69 @@ from source_versions import (
     VERSION_KIND_CUSTOM,
 )
 from source_version_diff import compare_source_texts
+from agent.source_fusion import build_source_fusion, save_fusion_as_version
+from agent.family_merge import build_family_merge_preview, apply_family_merge, resolve_source_family_id
+from genealogy_archive import build_family_archive, build_user_archive, import_family_archive, ARCHIVE_SCHEMA
+from gedcom import export_family_to_gedcom, import_gedcom_text
+from image_upload import save_upload_image
+from user_store import (
+    ensure_user_tables,
+    ensure_default_user,
+    migrate_families_to_default_owner,
+    create_user,
+    authenticate_user,
+    get_user,
+    resolve_user_id,
+    assign_family_owner,
+    follow_family,
+    unfollow_family,
+    list_families_dashboard,
+    DEFAULT_USER_ID,
+)
 from agent.genealogy_prompts import build_relation_describe_prompt
 from agent.relation_text import build_local_relation_description
 from agent.name_extractor import normalize_person_name
+from agent.ai_router import build_routing_status, get_platform_api_key, resolve_route
+from agent.ai_quota import ensure_ai_usage_table, record_usage
+from agent_discovery_store import (
+    ensure_agent_discovery_tables,
+    get_schedule_settings,
+    save_schedule_settings,
+    should_run_on_open,
+    list_discoveries,
+    count_pending_discoveries,
+    update_discovery_status,
+    get_discovery,
+    get_last_scan_run,
+    list_snapshots,
+    get_snapshot,
+    create_snapshot,
+    delete_snapshot,
+)
+from agent.agent_scanner import run_agent_scan
+from agent.agent_scheduler import configure_scheduler, start_agent_scheduler, stop_agent_scheduler
+from contextlib import asynccontextmanager
 
-app = FastAPI(title="族见 - 数字族谱API")
+DB_PATH = os.path.join(os.path.dirname(__file__), "genealogy.db")
+UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+
+@asynccontextmanager
+async def _app_lifespan(app: FastAPI):
+    conn = sqlite3.connect(DB_PATH, timeout=10)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    ensure_agent_discovery_tables(c)
+    conn.commit()
+    conn.close()
+    configure_scheduler(get_db)
+    start_agent_scheduler()
+    yield
+    await stop_agent_scheduler()
+
+
+app = FastAPI(title="族见 - 数字族谱API", lifespan=_app_lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -119,10 +180,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-DB_PATH = os.path.join(os.path.dirname(__file__), "genealogy.db")
-UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
-os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # AI Provider 预设
 AI_PROVIDERS = {
@@ -234,8 +291,12 @@ def resolve_credentials(
     api_key_override: str | None = None,
     api_base_override: str | None = None,
     group_id_override: str | None = None,
+    credential_source: str = "byok",
 ) -> tuple[str, str, str]:
     """返回 (api_key, api_base, group_id)，测试时可传入覆盖值"""
+    if credential_source == "platform":
+        preset = get_provider_config(provider_id)
+        return get_platform_api_key(), preset.get("api_base", ""), ""
     preset = get_provider_config(provider_id)
     api_key, api_base, group_id = get_provider_credentials(provider_id)
 
@@ -287,26 +348,85 @@ def get_provider_credentials(provider_id: str) -> tuple[str, str, str]:
     return api_key, api_base, group_id
 
 
-def load_model_selection() -> dict:
+def _ai_settings_row_to_dict(row) -> dict:
+    if not row:
+        return {
+            "ocr": dict(DEFAULT_OCR),
+            "parse": dict(DEFAULT_PARSE),
+            "routing_mode": "auto",
+            "ocr_tier": "auto",
+            "parse_tier": "auto",
+            "user_plan": "free",
+        }
+    keys = row.keys() if hasattr(row, "keys") else []
+    return {
+        "ocr": {"provider": row["ocr_provider"], "model": row["ocr_model"]},
+        "parse": {"provider": row["parse_provider"], "model": row["parse_model"]},
+        "routing_mode": row["routing_mode"] if "routing_mode" in keys and row["routing_mode"] else "auto",
+        "ocr_tier": row["ocr_tier"] if "ocr_tier" in keys and row["ocr_tier"] else "auto",
+        "parse_tier": row["parse_tier"] if "parse_tier" in keys and row["parse_tier"] else "auto",
+        "user_plan": row["user_plan"] if "user_plan" in keys and row["user_plan"] else "free",
+    }
+
+
+def load_ai_settings() -> dict:
     conn = get_db()
     c = conn.cursor()
-    row = c.execute("SELECT ocr_provider, ocr_model, parse_provider, parse_model FROM ai_settings WHERE id = 'default'").fetchone()
+    row = c.execute("SELECT * FROM ai_settings WHERE id = 'default'").fetchone()
     conn.close()
-    if row:
-        return {
-            "ocr": {"provider": row["ocr_provider"], "model": row["ocr_model"]},
-            "parse": {"provider": row["parse_provider"], "model": row["parse_model"]},
-        }
-    return {"ocr": dict(DEFAULT_OCR), "parse": dict(DEFAULT_PARSE)}
+    return _ai_settings_row_to_dict(row)
 
 
-def resolve_task_model(data: dict, task: str) -> tuple[str, str]:
-    """优先使用请求里传的模型，否则读数据库配置"""
-    saved = load_model_selection()[task]
-    incoming = data.get(task) or {}
-    provider = incoming.get("provider") or saved["provider"]
-    model = incoming.get("model") or saved["model"]
-    return provider, model
+def load_model_selection() -> dict:
+    settings = load_ai_settings()
+    return {"ocr": settings["ocr"], "parse": settings["parse"]}
+
+
+def resolve_routed_task(data: dict, task: str, user_id: str = DEFAULT_USER_ID) -> dict:
+    conn = get_db()
+    c = conn.cursor()
+    try:
+        return resolve_route(
+            c,
+            task,
+            user_id,
+            data=data,
+            ai_providers=AI_PROVIDERS,
+            is_configured_fn=_is_provider_configured,
+            load_selection_fn=load_model_selection,
+        )
+    finally:
+        conn.close()
+
+
+def resolve_task_model(data: dict, task: str, user_id: str = DEFAULT_USER_ID) -> tuple[str, str]:
+    routed = resolve_routed_task(data, task, user_id)
+    return routed.get("provider") or "", routed.get("model") or ""
+
+
+def record_routed_usage(user_id: str, task: str, routed: dict, count: int = 1) -> None:
+    if routed.get("fallback_local") or routed.get("source") != "platform":
+        return
+    conn = get_db()
+    c = conn.cursor()
+    for _ in range(max(1, int(count))):
+        record_usage(
+            c,
+            user_id,
+            task,
+            routed.get("tier") or "fast",
+            routed.get("provider") or "",
+            routed.get("source") or "platform",
+        )
+    conn.commit()
+    conn.close()
+
+
+async def apply_route_queue_wait(routed: dict) -> None:
+    wait_ms = int(routed.get("queue_wait_ms") or 0)
+    if wait_ms > 0:
+        import asyncio
+        await asyncio.sleep(wait_ms / 1000.0)
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -331,11 +451,28 @@ def init_db():
         provider TEXT PRIMARY KEY, api_key TEXT, api_base TEXT, group_id TEXT, updated_at TEXT)""")
     migrate_schema(c)
     ensure_versions_table(c)
+    ensure_user_tables(c)
+    ensure_default_user(c)
+    migrate_families_to_default_owner(c)
     ensure_ai_chat_table(c)
     ensure_agent_state_table(c)
+    ensure_ai_usage_table(c)
+    ensure_agent_discovery_tables(c)
     c.execute("""CREATE TABLE IF NOT EXISTS ai_settings (
         id TEXT PRIMARY KEY, ocr_provider TEXT, ocr_model TEXT,
-        parse_provider TEXT, parse_model TEXT, updated_at TEXT)""")
+        parse_provider TEXT, parse_model TEXT, updated_at TEXT,
+        routing_mode TEXT DEFAULT 'auto', ocr_tier TEXT DEFAULT 'auto',
+        parse_tier TEXT DEFAULT 'auto', user_plan TEXT DEFAULT 'free')""")
+    for col, typedef in (
+        ("routing_mode", "TEXT DEFAULT 'auto'"),
+        ("ocr_tier", "TEXT DEFAULT 'auto'"),
+        ("parse_tier", "TEXT DEFAULT 'auto'"),
+        ("user_plan", "TEXT DEFAULT 'free'"),
+    ):
+        try:
+            c.execute(f"ALTER TABLE ai_settings ADD COLUMN {col} {typedef}")
+        except sqlite3.OperationalError:
+            pass
     # 兼容旧表
     c.execute("""CREATE TABLE IF NOT EXISTS ai_config (
         id TEXT PRIMARY KEY, provider TEXT, api_key TEXT, model TEXT,
@@ -445,8 +582,26 @@ async def get_ai_config():
             "has_group_id": bool(gid),
         }
 
-    selection = load_model_selection()
+    selection = load_ai_settings()
     return {"keys": keys, **selection}
+
+
+@app.get("/api/ai/routing")
+async def get_ai_routing(x_user_id: str | None = Header(default=None, alias="X-User-Id")):
+    """Auto 调度状态：额度、推荐模型、平台/自带 Key 可用性。"""
+    user_id = resolve_user_id(x_user_id)
+    conn = get_db()
+    c = conn.cursor()
+    try:
+        return build_routing_status(
+            c,
+            user_id,
+            ai_providers=AI_PROVIDERS,
+            is_configured_fn=_is_provider_configured,
+            load_selection_fn=load_model_selection,
+        )
+    finally:
+        conn.close()
 
 
 @app.post("/api/ai/config")
@@ -484,15 +639,22 @@ async def save_ai_config(data: dict):
 
     ocr = data.get("ocr") or DEFAULT_OCR
     parse_cfg = data.get("parse") or DEFAULT_PARSE
+    routing_mode = (data.get("routing_mode") or "auto").strip()
+    ocr_tier = (data.get("ocr_tier") or "auto").strip()
+    parse_tier = (data.get("parse_tier") or "auto").strip()
     c.execute(
         """INSERT OR REPLACE INTO ai_settings
-           (id, ocr_provider, ocr_model, parse_provider, parse_model, updated_at)
-           VALUES ('default', ?, ?, ?, ?, ?)""",
+           (id, ocr_provider, ocr_model, parse_provider, parse_model,
+            routing_mode, ocr_tier, parse_tier, user_plan, updated_at)
+           VALUES ('default', ?, ?, ?, ?, ?, ?, ?, 'free', ?)""",
         (
             ocr.get("provider", DEFAULT_OCR["provider"]),
             ocr.get("model", DEFAULT_OCR["model"]),
             parse_cfg.get("provider", DEFAULT_PARSE["provider"]),
             parse_cfg.get("model", DEFAULT_PARSE["model"]),
+            routing_mode,
+            ocr_tier,
+            parse_tier,
             now,
         ),
     )
@@ -660,6 +822,7 @@ async def call_vision_model(
     api_key_override: str | None = None,
     api_base_override: str | None = None,
     group_id_override: str | None = None,
+    credential_source: str = "byok",
 ) -> tuple[str, str]:
     """返回 (识别文本, 错误信息)"""
     api_key, api_base, group_id = resolve_credentials(
@@ -667,6 +830,7 @@ async def call_vision_model(
         api_key_override=api_key_override,
         api_base_override=api_base_override,
         group_id_override=group_id_override,
+        credential_source=credential_source,
     )
     if not api_key:
         return "", "未配置 API Key，请在设置中填写并保存"
@@ -724,6 +888,7 @@ async def call_text_model(
     api_base_override: str | None = None,
     group_id_override: str | None = None,
     max_tokens: int = 2048,
+    credential_source: str = "byok",
 ) -> tuple[str, str]:
     """返回 (内容, 错误信息)"""
     api_key, api_base, group_id = resolve_credentials(
@@ -731,6 +896,7 @@ async def call_text_model(
         api_key_override=api_key_override,
         api_base_override=api_base_override,
         group_id_override=group_id_override,
+        credential_source=credential_source,
     )
     if not api_key:
         return "", "未配置 API Key"
@@ -936,27 +1102,93 @@ async def health_check():
     return {"success": True, "families": family_count}
 
 
+@app.get("/api/config/genealogy-pipeline")
+async def get_genealogy_pipeline_config():
+    """族谱文字→关系→图谱流水线配置（Agent / 前端格式说明共用）。"""
+    from agent.pipeline_config import public_config_payload
+
+    return {"success": True, **public_config_payload()}
+
+
 @app.get("/api/families")
-async def get_families():
+async def get_families(x_user_id: Optional[str] = Header(None, alias="X-User-Id")):
     conn = get_db()
     c = conn.cursor()
-    families = c.execute("""SELECT f.*, COUNT(p.id) as person_count FROM families f
-        LEFT JOIN persons p ON p.family_id = f.id GROUP BY f.id ORDER BY f.created_at DESC""").fetchall()
+    uid = resolve_user_id(c, x_user_id)
+    rows = c.execute(
+        """SELECT f.*, COUNT(p.id) AS person_count, m.role AS membership_role
+           FROM families f
+           JOIN family_memberships m ON m.family_id = f.id
+           LEFT JOIN persons p ON p.family_id = f.id
+           WHERE m.user_id = ?
+           GROUP BY f.id
+           ORDER BY f.created_at DESC""",
+        (uid,),
+    ).fetchall()
     conn.close()
-    return [dict(f) for f in families]
+    return [dict(f) for f in rows]
+
+
+@app.get("/api/families/dashboard")
+async def get_families_dashboard(x_user_id: Optional[str] = Header(None, alias="X-User-Id")):
+    conn = get_db()
+    c = conn.cursor()
+    uid = resolve_user_id(c, x_user_id)
+    data = list_families_dashboard(c, uid)
+    conn.close()
+    return {"success": True, **data}
+
+
+@app.post("/api/families/{family_id}/follow")
+async def follow_family_api(
+    family_id: str,
+    x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+):
+    conn = get_db()
+    c = conn.cursor()
+    uid = resolve_user_id(c, x_user_id)
+    result = follow_family(c, family_id, uid)
+    if not result.get("success"):
+        conn.close()
+        raise HTTPException(status_code=400, detail=result.get("error") or "关注失败")
+    conn.commit()
+    conn.close()
+    return result
+
+
+@app.delete("/api/families/{family_id}/follow")
+async def unfollow_family_api(
+    family_id: str,
+    x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+):
+    conn = get_db()
+    c = conn.cursor()
+    uid = resolve_user_id(c, x_user_id)
+    result = unfollow_family(c, family_id, uid)
+    if not result.get("success"):
+        conn.close()
+        raise HTTPException(status_code=400, detail=result.get("error") or "取消关注失败")
+    conn.commit()
+    conn.close()
+    return result
 
 @app.post("/api/families")
-async def create_family(family: FamilyCreate):
+async def create_family(
+    family: FamilyCreate,
+    x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+):
     conn = get_db()
     c = conn.cursor()
+    uid = resolve_user_id(c, x_user_id)
     fid = str(uuid.uuid4())[:8]
     now = datetime.now().isoformat()
     start_gen = max(1, int(family.start_generation or 1))
     c.execute(
-        """INSERT INTO families (id, name, surname, description, start_generation, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (fid, family.name, family.surname, family.description, start_gen, now, now),
+        """INSERT INTO families (id, name, surname, description, start_generation, created_at, updated_at, owner_user_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (fid, family.name, family.surname, family.description, start_gen, now, now, uid),
     )
+    assign_family_owner(c, fid, uid)
     conn.commit()
     conn.close()
     return {"id": fid, "name": family.name, "success": True}
@@ -1107,16 +1339,49 @@ async def post_family_source_version(family_id: str, data: dict):
     return {"success": True, "version": version, "family": dict(row)}
 
 
+@app.get("/api/uploads/{filename}")
+async def get_upload_file(filename: str):
+    """访问 OCR 扫描保存的原图。"""
+    safe = os.path.basename(filename or "")
+    if not safe or safe != filename:
+        raise HTTPException(status_code=404, detail="Not found")
+    filepath = os.path.join(UPLOAD_DIR, safe)
+    if not os.path.isfile(filepath):
+        raise HTTPException(status_code=404, detail="Not found")
+    ext = os.path.splitext(safe)[1].lower()
+    media_types = {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+        ".bmp": "image/bmp",
+        ".pdf": "application/pdf",
+    }
+    return FileResponse(filepath, media_type=media_types.get(ext, "application/octet-stream"))
+
+
 @app.put("/api/families/{family_id}/source-versions/{version_id}")
 async def put_family_source_version(family_id: str, version_id: str, data: dict):
     conn = get_db()
     c = conn.cursor()
+    image_path = data.get("image_path")
+    image_b64 = data.get("image_base64")
+    if image_b64:
+        try:
+            fname, _ = save_upload_image(UPLOAD_DIR, image_b64)
+            image_path = fname
+        except ValueError as exc:
+            conn.close()
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     version = update_source_version(
         c, family_id, version_id,
         source_text=data.get("source_text"),
         source_annotations=data.get("source_annotations"),
         label=data.get("label"),
         note=data.get("note"),
+        image_path=image_path,
     )
     if not version:
         conn.close()
@@ -1189,6 +1454,36 @@ async def preview_text_edition(family_id: str, data: dict | None = None):
     }
 
 
+@app.post("/api/families/{family_id}/source-image")
+async def upload_family_source_image(family_id: str, data: dict):
+    """为已有族谱添加或更换版本一 OCR 对照原图（不要求重新扫描）。"""
+    image_b64 = data.get("image_base64") or data.get("image")
+    if not image_b64:
+        raise HTTPException(status_code=400, detail="Missing image data")
+
+    conn = get_db()
+    c = conn.cursor()
+    family = c.execute("SELECT id FROM families WHERE id = ?", (family_id,)).fetchone()
+    if not family:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Family not found")
+
+    try:
+        filename, _ = save_upload_image(UPLOAD_DIR, image_b64)
+        version = attach_source_image(c, family_id, filename)
+    except ValueError as exc:
+        conn.close()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        conn.close()
+        raise HTTPException(status_code=500, detail=f"保存原图失败：{exc}") from exc
+
+    conn.commit()
+    row = c.execute("SELECT * FROM families WHERE id = ?", (family_id,)).fetchone()
+    conn.close()
+    return {"success": True, "version": version, "image_path": filename, "family": dict(row)}
+
+
 @app.post("/api/families/{family_id}/source-versions/save-ocr-pipeline")
 async def save_ocr_pipeline_versions(family_id: str, data: dict):
     """OCR 扫描入库：版本一 OCR 原文 + 版本二 关系描述 + 可选版本三 用户修正。"""
@@ -1200,6 +1495,9 @@ async def save_ocr_pipeline_versions(family_id: str, data: dict):
         raise HTTPException(status_code=404, detail="Family not found")
 
     try:
+        img_path = data.get("image_path")
+        if img_path and str(img_path).lower().endswith(".pdf"):
+            img_path = None
         result = save_ocr_scan_versions(
             c,
             family_id,
@@ -1207,7 +1505,8 @@ async def save_ocr_pipeline_versions(family_id: str, data: dict):
             relation_description=data.get("relation_description") or "",
             custom_text=data.get("custom_text") or "",
             source_annotations=data.get("source_annotations"),
-            image_path=data.get("image_path"),
+            image_path=img_path,
+            pdf_path=data.get("pdf_path"),
             layout_hint=data.get("layout_hint") or "horizontal_ltr",
             active_kind=data.get("active_kind") or VERSION_KIND_RELATION_DESC,
         )
@@ -1222,9 +1521,14 @@ async def save_ocr_pipeline_versions(family_id: str, data: dict):
 
 
 @app.post("/api/families/{family_id}/source-versions/regenerate-relation-desc")
-async def regenerate_relation_description(family_id: str, data: dict | None = None):
-    """用 AI 从版本一 OCR 原文重新生成版本二 关系描述稿。"""
+async def regenerate_relation_description(
+    family_id: str,
+    data: dict | None = None,
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+):
+    """用 AI（+对话上下文+规则降级）从版本一 OCR 重新生成关系描述稿。"""
     data = data or {}
+    user_id = resolve_user_id(x_user_id)
     conn = get_db()
     c = conn.cursor()
     family = c.execute("SELECT id FROM families WHERE id = ?", (family_id,)).fetchone()
@@ -1232,44 +1536,85 @@ async def regenerate_relation_description(family_id: str, data: dict | None = No
         conn.close()
         raise HTTPException(status_code=404, detail="Family not found")
 
-    raw = (data.get("ocr_text") or "").strip()
-    v1 = find_version_by_kind(c, family_id, VERSION_KIND_OCR_RAW)
-    if not raw and v1:
-        raw = (v1.get("source_text") or "").strip()
-    if not raw:
-        conn.close()
-        raise HTTPException(status_code=400, detail="请先保存或提供版本一 OCR 原文")
+    routed = resolve_routed_task(data, "parse", user_id)
+    parse_provider = routed.get("provider") or ""
+    parse_model = routed.get("model") or ""
+    await apply_route_queue_wait(routed)
+    target_kind = (data.get("target_kind") or VERSION_KIND_RELATION_DESC).strip()
+    if target_kind not in (VERSION_KIND_RELATION_DESC, VERSION_KIND_CUSTOM):
+        target_kind = VERSION_KIND_RELATION_DESC
 
-    parse_provider, parse_model = resolve_task_model(data, "parse")
-    prompt = build_relation_describe_prompt(raw)
-    content, err = await call_text_model(parse_provider, parse_model, prompt)
-    relation_text = (content or "").strip()
-    if not relation_text or len(relation_text) < 4:
-        conn.close()
-        raise HTTPException(status_code=502, detail=err or "AI 未能生成关系描述稿")
+    persons_rows = c.execute("SELECT name FROM persons WHERE family_id = ?", (family_id,)).fetchall()
+    persons = [{"name": r["name"]} for r in persons_rows]
 
-    v1_id = v1["id"] if v1 else None
-    if not v1_id:
-        v1_row = upsert_version_by_kind(
-            c, family_id, VERSION_KIND_OCR_RAW,
-            source_text=raw, status="confirmed",
-        )
-        v1_id = v1_row["id"]
+    from agent.regenerate_context import build_regenerate_context
+    from agent.source_regenerate import regenerate_relation_desc
 
-    v2 = upsert_version_by_kind(
-        c, family_id, VERSION_KIND_RELATION_DESC,
-        source_text=relation_text,
-        parent_version_id=v1_id,
-        status="draft",
-        set_active=True,
+    ctx = build_regenerate_context(
+        c,
+        family_id,
+        persons=persons,
+        previous_relation_text=(data.get("previous_draft") or "").strip(),
     )
+    if (data.get("context_notes") or "").strip():
+        ctx["context_notes"] = (
+            (ctx.get("context_notes") or "") + "\n\n" + data["context_notes"].strip()
+        ).strip()
+
+    async def text_fn(provider, model, prompt, max_tokens=8192):
+        return await call_text_model(
+            provider,
+            model,
+            prompt,
+            max_tokens=max_tokens,
+            credential_source=routed.get("source") if provider == parse_provider else "byok",
+        )
+
+    result = await regenerate_relation_desc(
+        c,
+        family_id,
+        parse_provider=parse_provider,
+        parse_model=parse_model,
+        text_fn=text_fn,
+        ocr_text=(data.get("ocr_text") or "").strip() or None,
+        target_kind=target_kind,
+        context_notes=ctx.get("context_notes") or "",
+        previous_draft=ctx.get("previous_draft") or "",
+        allow_rule_fallback=bool(data.get("allow_rule_fallback", True)),
+    )
+    if not result.get("success"):
+        conn.close()
+        raise HTTPException(status_code=502, detail=result.get("error") or "AI 未能生成关系描述稿")
+
+    if result.get("used_ai"):
+        record_usage(
+            c,
+            user_id,
+            "parse",
+            routed.get("tier") or "fast",
+            result.get("provider") or parse_provider,
+            routed.get("source") or "byok",
+        )
+
     conn.commit()
     payload = list_source_versions(c, family_id)
     conn.close()
     return {
         "success": True,
-        "relation_description": relation_text,
-        "version": v2,
+        "relation_description": result.get("relation_description"),
+        "version": result.get("version"),
+        "used_ai": result.get("used_ai"),
+        "provider": result.get("provider"),
+        "model": result.get("model"),
+        "fallback_reason": result.get("fallback_reason"),
+        "message": result.get("message"),
+        "context_turns": ctx.get("chat_turns", 0),
+        "routing": {
+            "source": routed.get("source"),
+            "tier": routed.get("tier"),
+            "label": routed.get("label"),
+            "queue_wait_ms": routed.get("queue_wait_ms", 0),
+        },
         **payload,
     }
 
@@ -1399,6 +1744,18 @@ async def delete_family_source_version(family_id: str, version_id: str):
 async def delete_family(family_id: str):
     conn = get_db()
     c = conn.cursor()
+    family = c.execute("SELECT id FROM families WHERE id = ?", (family_id,)).fetchone()
+    if not family:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Family not found")
+
+    from agent.pending_actions import clear_family_pending
+    from agent.organize_session import clear_family_organize_sessions
+
+    clear_family_pending(c, family_id)
+    c.execute("DELETE FROM family_agent_state WHERE family_id = ?", (family_id,))
+    c.execute("DELETE FROM family_ai_chat WHERE family_id = ?", (family_id,))
+    c.execute("DELETE FROM family_memberships WHERE family_id = ?", (family_id,))
     c.execute("DELETE FROM relations WHERE family_id = ?", (family_id,))
     c.execute("DELETE FROM ocr_records WHERE family_id = ?", (family_id,))
     c.execute("DELETE FROM family_source_versions WHERE family_id = ?", (family_id,))
@@ -1406,6 +1763,7 @@ async def delete_family(family_id: str):
     c.execute("DELETE FROM families WHERE id = ?", (family_id,))
     conn.commit()
     conn.close()
+    clear_family_organize_sessions(family_id)
     return {"success": True}
 
 @app.get("/api/families/{family_id}")
@@ -1758,7 +2116,7 @@ async def create_relation(relation: dict):
         rid = create_relation_record(
             c, family_id, from_id, to_id, rtype,
             status=relation.get("status", "confirmed"),
-            confidence=float(relation.get("confidence", 1.0)),
+            confidence=float(relation.get("confidence") if relation.get("confidence") is not None else 1.0),
             relation_subtype=relation.get("relation_subtype", "birth"),
             now=now,
         )
@@ -2027,17 +2385,34 @@ def _is_provider_configured(provider_id: str) -> bool:
 
 
 @app.get("/api/agent/status")
-async def agent_status():
+async def agent_status(x_user_id: str | None = Header(default=None, alias="X-User-Id")):
     """族谱智能体状态：能力列表与 AI 是否就绪"""
-    selection = load_model_selection()
+    user_id = resolve_user_id(x_user_id)
+    selection = load_ai_settings()
     ocr = selection["ocr"]
     parse_cfg = selection["parse"]
-    return get_agent_status(
-        ocr_configured=_is_provider_configured(ocr["provider"]),
-        parse_configured=_is_provider_configured(parse_cfg["provider"]),
+    conn = get_db()
+    c = conn.cursor()
+    routing = build_routing_status(
+        c,
+        user_id,
+        ai_providers=AI_PROVIDERS,
+        is_configured_fn=_is_provider_configured,
+        load_selection_fn=load_model_selection,
+    )
+    conn.close()
+    ocr_rec = routing.get("recommendations", {}).get("ocr") or {}
+    parse_rec = routing.get("recommendations", {}).get("parse") or {}
+    ocr_ready = bool(ocr_rec.get("provider")) or bool(ocr_rec.get("fallback_local"))
+    parse_ready = bool(parse_rec.get("provider")) or bool(parse_rec.get("fallback_local"))
+    status = get_agent_status(
+        ocr_configured=ocr_ready,
+        parse_configured=parse_ready,
         ocr_selection=ocr,
         parse_selection=parse_cfg,
     )
+    status["routing"] = routing
+    return status
 
 
 @app.post("/api/agent/generate")
@@ -2775,7 +3150,11 @@ async def reset_family_agent_session(family_id: str, data: dict | None = None):
 
 
 @app.post("/api/families/{family_id}/agent/chat")
-async def family_agent_chat(family_id: str, data: dict):
+async def family_agent_chat(
+    family_id: str,
+    data: dict,
+    x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+):
     """对话式 Agent：LLM 选工具（可回退规则）→ 回复 + UI 指令 + 待确认卡片。"""
     message = (data.get("message") or "").strip()
     if not message:
@@ -2835,12 +3214,14 @@ async def family_agent_chat(family_id: str, data: dict):
         return await call_text_model(parse_provider, parse_model, prompt, max_tokens=4096)
 
     history = state.get("messages") or []
+    uid = resolve_user_id(c, x_user_id)
     deps = LlmAgentDeps(
         chat_fn=chat_fn,
         ai_fn=ai_fn,
         ai_configured=ai_configured,
         cursor=c,
         family_id=family_id,
+        user_id=uid,
         source_text=source_text,
         source_excerpt_fn=excerpt_for,
         message_history=history,
@@ -2863,7 +3244,7 @@ async def family_agent_chat(family_id: str, data: dict):
     state_patch = {
         "active_tab": turn.state_patch.get("active_tab", active_tab),
         "selected_person_id": turn.state_patch.get("selected_person_id", selected_person_id),
-        "anchor_person_id": anchor_person_id,
+        "anchor_person_id": turn.state_patch.get("anchor_person_id", anchor_person_id),
     }
     save_agent_state(c, family_id, state_patch)
     extra_meta: dict = {
@@ -2904,7 +3285,11 @@ async def family_agent_chat(family_id: str, data: dict):
 
 
 @app.post("/api/families/{family_id}/agent/confirm")
-async def family_agent_confirm(family_id: str, data: dict):
+async def family_agent_confirm(
+    family_id: str,
+    data: dict,
+    x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+):
     """用户确认/拒绝 Agent 写操作。"""
     token = (data.get("token") or "").strip()
     if not token:
@@ -3111,6 +3496,63 @@ async def refresh_ai_organize_diff(family_id: str, data: dict):
     )
     diff = compute_organize_diff(persons, relations, plan, built)
     return {"success": True, "plan": plan, "diff": diff}
+
+
+@app.post("/api/families/{family_id}/smart-suggest")
+async def smart_suggest_family(family_id: str, data: dict | None = None):
+    """本地智能分析：从原文版本快速推断待补成员/关系，秒级返回可应用方案。"""
+    data = data or {}
+    conn = get_db()
+    c = conn.cursor()
+    family_row = c.execute("SELECT id FROM families WHERE id = ?", (family_id,)).fetchone()
+    if not family_row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Family not found")
+
+    persons_rows = c.execute("SELECT * FROM persons WHERE family_id = ?", (family_id,)).fetchall()
+    rel_rows = c.execute("SELECT * FROM relations WHERE family_id = ?", (family_id,)).fetchall()
+
+    source_version_id = (data.get("source_version_id") or "").strip() or None
+    source_text_override = (data.get("source_text") or "").strip()
+    if source_text_override:
+        source_text = source_text_override
+        source_version = {
+            "label": (data.get("source_version_label") or "").strip() or "编辑稿",
+            "version_kind": "relation_desc",
+        }
+    elif source_version_id:
+        source_version = get_source_version(c, family_id, source_version_id)
+        source_text = (source_version.get("source_text") or "").strip() if source_version else ""
+    else:
+        source_text, source_version = get_digitize_source_for_family(c, family_id)
+        source_text = (source_text or "").strip()
+
+    conn.close()
+
+    persons = [row_to_person(r) for r in persons_rows]
+    id_to_name = {r["id"]: r["name"] for r in persons_rows}
+    relations = []
+    for r in rel_rows:
+        fn = id_to_name.get(r["from_person_id"])
+        tn = id_to_name.get(r["to_person_id"])
+        if fn and tn:
+            relations.append({
+                "from": fn,
+                "to": tn,
+                "type": r["relation_type"] or "parent_child",
+                "status": dict(r).get("status") or "confirmed",
+            })
+
+    result = build_smart_suggest_from_source(
+        persons,
+        relations,
+        source_text,
+        source_version=source_version,
+        style=data.get("style") or "su",
+    )
+    if not result.get("success"):
+        return result
+    return {"success": True, **result}
 
 
 @app.post("/api/families/{family_id}/ai-organize")
@@ -3382,36 +3824,183 @@ async def agent_validate(data: dict):
 
 
 @app.post("/api/agent/scan-ocr")
-async def agent_scan_ocr(data: dict):
+async def agent_scan_ocr(
+    data: dict,
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+):
     """扫描建谱 · 第一步：仅 OCR，返回版本一原文。"""
-    image_base64 = data.get("image")
-    ocr_provider, ocr_model = resolve_task_model(data, "ocr")
+    user_id = resolve_user_id(x_user_id)
+    image_raw = data.get("image")
+    if not image_raw:
+        raise HTTPException(status_code=400, detail="Missing image data")
+    try:
+        from image_upload import normalize_image_base64
+
+        image_base64 = normalize_image_base64(image_raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    routed = resolve_routed_task(data, "ocr", user_id)
+    ocr_provider = routed.get("provider") or ""
+    ocr_model = routed.get("model") or ""
+    if not ocr_provider:
+        raise HTTPException(
+            status_code=503,
+            detail=routed.get("error_hint") or "暂无可用 OCR 模型，请在设置中配置 Key 或开启 Auto 模式",
+        )
+    await apply_route_queue_wait(routed)
+
+    cred_source = routed.get("source") or "byok"
 
     async def ocr_fn(provider, model, img, prompt):
-        return await call_vision_model(provider, model, img, prompt)
+        return await call_vision_model(
+            provider, model, img, prompt, credential_source=cred_source
+        )
 
-    return await run_ocr_only(
+    result = await run_ocr_only(
         image_base64,
         ocr_provider=ocr_provider,
         ocr_model=ocr_model,
         ocr_fn=ocr_fn,
     )
+    if result.get("success"):
+        record_routed_usage(user_id, "ocr", routed)
+        result["routing"] = {
+            "source": routed.get("source"),
+            "tier": routed.get("tier"),
+            "label": routed.get("label"),
+            "queue_wait_ms": routed.get("queue_wait_ms", 0),
+        }
+        try:
+            filename, _ = save_upload_image(UPLOAD_DIR, image_base64)
+            result["image_path"] = filename
+        except ValueError as exc:
+            result["image_save_warning"] = str(exc)
+    return result
+
+
+@app.post("/api/agent/pdf/info")
+async def agent_pdf_info(data: dict):
+    """解析多页 PDF：返回页数等元信息（不上传 OCR）。"""
+    raw = data.get("pdf") or data.get("file")
+    if not raw:
+        raise HTTPException(status_code=400, detail="缺少 PDF 数据")
+    try:
+        pdf_bytes = normalize_pdf_base64(raw)
+        info = get_pdf_info(pdf_bytes)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"success": True, **info}
+
+
+@app.post("/api/agent/pdf/scan-ocr")
+async def agent_pdf_scan_ocr(
+    data: dict,
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+):
+    """多页 PDF：逐页转图 → OCR → 合并为版本一原文（带页码分隔）。"""
+    user_id = resolve_user_id(x_user_id)
+    raw = data.get("pdf") or data.get("file")
+    if not raw:
+        raise HTTPException(status_code=400, detail="缺少 PDF 数据")
+    try:
+        pdf_bytes = normalize_pdf_base64(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    routed = resolve_routed_task(data, "ocr", user_id)
+    ocr_provider = routed.get("provider") or ""
+    ocr_model = routed.get("model") or ""
+    if not ocr_provider:
+        raise HTTPException(
+            status_code=503,
+            detail=routed.get("error_hint") or "暂无可用 OCR 模型",
+        )
+    await apply_route_queue_wait(routed)
+    cred_source = routed.get("source") or "byok"
+
+    async def ocr_fn(provider, model, img, prompt):
+        return await call_vision_model(
+            provider, model, img, prompt, credential_source=cred_source
+        )
+
+    try:
+        result = await run_pdf_ocr_pipeline(
+            pdf_bytes,
+            ocr_provider=ocr_provider,
+            ocr_model=ocr_model,
+            ocr_fn=ocr_fn,
+            page_from=int(data.get("page_from") or 1),
+            page_to=int(data["page_to"]) if data.get("page_to") else None,
+            dpi=int(data.get("dpi") or 160),
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if result.get("success"):
+        record_routed_usage(user_id, "ocr", routed, count=max(1, result.get("pages_recognized") or 1))
+        result["routing"] = {
+            "source": routed.get("source"),
+            "tier": routed.get("tier"),
+            "label": routed.get("label"),
+        }
+        # 保存 PDF 源文件 + 第一页预览图（供对照显示）
+        try:
+            import uuid as _uuid
+            pdf_name = f"{_uuid.uuid4().hex}.pdf"
+            pdf_path = os.path.join(UPLOAD_DIR, pdf_name)
+            with open(pdf_path, "wb") as f:
+                f.write(pdf_bytes)
+            result["pdf_path"] = pdf_name
+        except OSError:
+            result["pdf_save_warning"] = "PDF 源文件保存失败"
+        preview_b64 = result.get("preview_image_base64")
+        if preview_b64:
+            try:
+                fname, _ = save_upload_image(UPLOAD_DIR, preview_b64)
+                result["image_path"] = fname
+            except ValueError as exc:
+                result["image_save_warning"] = str(exc)
+    return result
 
 
 @app.post("/api/agent/scan")
-async def agent_scan(data: dict):
+async def agent_scan(
+    data: dict,
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+):
     """扫描建谱流水线：OCR → 解析 → 校验"""
+    user_id = resolve_user_id(x_user_id)
     image_base64 = data.get("image")
-    ocr_provider, ocr_model = resolve_task_model(data, "ocr")
-    parse_provider, parse_model = resolve_task_model(data, "parse")
+    ocr_routed = resolve_routed_task(data, "ocr", user_id)
+    parse_routed = resolve_routed_task(data, "parse", user_id)
+    ocr_provider = ocr_routed.get("provider") or ""
+    ocr_model = ocr_routed.get("model") or ""
+    parse_provider = parse_routed.get("provider") or ""
+    parse_model = parse_routed.get("model") or ""
+    if not ocr_provider:
+        raise HTTPException(
+            status_code=503,
+            detail=ocr_routed.get("error_hint") or "暂无可用 OCR 模型",
+        )
+    await apply_route_queue_wait(ocr_routed)
+    await apply_route_queue_wait(parse_routed)
 
     async def ocr_fn(provider, model, img, prompt):
-        return await call_vision_model(provider, model, img, prompt)
+        return await call_vision_model(
+            provider, model, img, prompt, credential_source=ocr_routed.get("source") or "byok"
+        )
 
     async def parse_fn(provider, model, prompt):
-        return await call_text_model(provider, model, prompt)
+        return await call_text_model(
+            provider, model, prompt, credential_source=parse_routed.get("source") or "byok"
+        )
 
-    return await run_scan_pipeline(
+    result = await run_scan_pipeline(
         image_base64,
         ocr_provider=ocr_provider,
         ocr_model=ocr_model,
@@ -3420,28 +4009,55 @@ async def agent_scan(data: dict):
         ocr_fn=ocr_fn,
         parse_fn=parse_fn,
     )
+    if result.get("success"):
+        record_routed_usage(user_id, "ocr", ocr_routed)
+        if parse_provider:
+            record_routed_usage(user_id, "parse", parse_routed)
+        result["routing"] = {
+            "ocr": {"source": ocr_routed.get("source"), "tier": ocr_routed.get("tier"), "label": ocr_routed.get("label")},
+            "parse": {"source": parse_routed.get("source"), "tier": parse_routed.get("tier"), "label": parse_routed.get("label")},
+        }
+    return result
 
 
 # ==================== OCR API ====================
 
 @app.post("/api/ocr/recognize")
-async def ocr_recognize(data: dict):
+async def ocr_recognize(
+    data: dict,
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+):
     """OCR文字识别"""
-    image_base64 = data.get("image")
-    if not image_base64:
+    user_id = resolve_user_id(x_user_id)
+    image_raw = data.get("image")
+    if not image_raw:
         raise HTTPException(status_code=400, detail="Missing image data")
 
     try:
-        image_data = base64.b64decode(image_base64)
-        filename = f"{uuid.uuid4().hex}.jpg"
-        filepath = os.path.join(UPLOAD_DIR, filename)
-        with open(filepath, "wb") as f:
-            f.write(image_data)
+        filename, _ = save_upload_image(UPLOAD_DIR, image_raw)
+        from image_upload import normalize_image_base64
 
-        ocr_provider, ocr_model = resolve_task_model(data, "ocr")
+        image_base64 = normalize_image_base64(image_raw)
+
+        routed = resolve_routed_task(data, "ocr", user_id)
+        ocr_provider = routed.get("provider") or ""
+        ocr_model = routed.get("model") or ""
+        if not ocr_provider:
+            return {
+                "success": False,
+                "error": routed.get("error_hint") or "暂无可用 OCR 模型",
+                "routing": routed,
+            }
+        await apply_route_queue_wait(routed)
         prompt = "请识别这张族谱图片中的所有文字，保持原有格式，识别所有人的姓名、生卒年、世代等信息。"
 
-        recognized_text, ocr_error = await call_vision_model(ocr_provider, ocr_model, image_base64, prompt)
+        recognized_text, ocr_error = await call_vision_model(
+            ocr_provider,
+            ocr_model,
+            image_base64,
+            prompt,
+            credential_source=routed.get("source") or "byok",
+        )
 
         if ocr_error:
             return {
@@ -3451,6 +4067,7 @@ async def ocr_recognize(data: dict):
                 "model": ocr_model,
             }
 
+        record_routed_usage(user_id, "ocr", routed)
         return {
             "success": True,
             "text": recognized_text.strip(),
@@ -3458,8 +4075,15 @@ async def ocr_recognize(data: dict):
             "provider": ocr_provider,
             "model": ocr_model,
             "is_demo": False,
+            "routing": {
+                "source": routed.get("source"),
+                "tier": routed.get("tier"),
+                "label": routed.get("label"),
+            },
         }
 
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -3534,6 +4158,307 @@ async def ocr_parse(data: dict):
         out["warning"] = parsed["warning"]
     return out
 
+# ==================== 用户体系 ====================
+
+@app.post("/api/auth/register")
+async def auth_register(data: dict):
+    conn = get_db()
+    c = conn.cursor()
+    try:
+        user = create_user(
+            c,
+            email=data.get("email") or "",
+            password=data.get("password") or "",
+            display_name=data.get("display_name") or "",
+        )
+    except ValueError as exc:
+        conn.close()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    conn.commit()
+    conn.close()
+    return {"success": True, "user": user}
+
+
+@app.post("/api/auth/login")
+async def auth_login(data: dict):
+    conn = get_db()
+    c = conn.cursor()
+    user = authenticate_user(c, email=data.get("email") or "", password=data.get("password") or "")
+    conn.close()
+    if not user:
+        raise HTTPException(status_code=401, detail="邮箱或密码错误")
+    return {"success": True, "user": user, "user_id": user["id"]}
+
+
+@app.get("/api/auth/me")
+async def auth_me(x_user_id: Optional[str] = Header(None, alias="X-User-Id")):
+    conn = get_db()
+    c = conn.cursor()
+    uid = resolve_user_id(c, x_user_id)
+    user = get_user(c, uid)
+    conn.close()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {"success": True, "user": user}
+
+
+# ==================== 多版本原文融合 ====================
+
+@app.post("/api/families/{family_id}/source-fusion")
+async def family_source_fusion(family_id: str, data: dict | None = None):
+    """提取全部原文版本 + 主谱关系，生成逐步融合文字稿。"""
+    data = data or {}
+    conn = get_db()
+    c = conn.cursor()
+    family = c.execute("SELECT id FROM families WHERE id = ?", (family_id,)).fetchone()
+    if not family:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Family not found")
+    persons = [dict(r) for r in c.execute("SELECT * FROM persons WHERE family_id = ?", (family_id,)).fetchall()]
+    relations = [dict(r) for r in c.execute("SELECT * FROM relations WHERE family_id = ?", (family_id,)).fetchall()]
+    result = build_source_fusion(
+        c,
+        family_id,
+        tree_persons=persons,
+        tree_relations=relations,
+        include_tree=bool(data.get("include_tree", True)),
+    )
+    conn.close()
+    return result
+
+
+@app.post("/api/families/{family_id}/source-fusion/save")
+async def family_source_fusion_save(family_id: str, data: dict):
+    conn = get_db()
+    c = conn.cursor()
+    family = c.execute("SELECT id FROM families WHERE id = ?", (family_id,)).fetchone()
+    if not family:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Family not found")
+    text = (data.get("stepped_text") or data.get("fusion_text") or "").strip()
+    if not text and data.get("regenerate"):
+        persons = [dict(r) for r in c.execute("SELECT * FROM persons WHERE family_id = ?", (family_id,)).fetchall()]
+        relations = [dict(r) for r in c.execute("SELECT * FROM relations WHERE family_id = ?", (family_id,)).fetchall()]
+        built = build_source_fusion(c, family_id, tree_persons=persons, tree_relations=relations)
+        text = built.get("stepped_text") or ""
+    try:
+        version = save_fusion_as_version(
+            c,
+            family_id,
+            text,
+            set_active=bool(data.get("set_active")),
+        )
+    except ValueError as exc:
+        conn.close()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    conn.commit()
+    row = c.execute("SELECT * FROM families WHERE id = ?", (family_id,)).fetchone()
+    conn.close()
+    return {"success": True, "version": version, "family": dict(row)}
+
+
+@app.get("/api/families/{family_id}/merge-preview")
+async def family_merge_preview(
+    family_id: str,
+    source_id: str = Query(..., alias="source_id"),
+    x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+):
+    """预览将 source_id 族谱合并进 family_id 的增量变化。"""
+    conn = get_db()
+    c = conn.cursor()
+    uid = resolve_user_id(c, x_user_id)
+    try:
+        result = build_family_merge_preview(c, family_id, source_id, uid)
+    except ValueError as exc:
+        conn.close()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    conn.close()
+    return result
+
+
+@app.post("/api/families/{family_id}/merge-from")
+async def family_merge_from(
+    family_id: str,
+    data: dict,
+    x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+):
+    """将另一份族谱增量合并进当前族谱。"""
+    conn = get_db()
+    c = conn.cursor()
+    uid = resolve_user_id(c, x_user_id)
+    source_id = (data.get("source_family_id") or data.get("source_id") or "").strip()
+    if not source_id:
+        source_id = resolve_source_family_id(
+            c,
+            uid,
+            source_family_id=data.get("source_family_id"),
+            source_family_name=data.get("source_family_name"),
+            exclude_family_id=family_id,
+        ) or ""
+    if not source_id:
+        conn.close()
+        raise HTTPException(status_code=400, detail="请指定要合并的源族谱 source_family_id 或 source_family_name")
+    now = datetime.now().isoformat()
+    try:
+        result = apply_family_merge(
+            c,
+            family_id,
+            source_id,
+            uid,
+            now,
+            merge_ocr_text=bool(data.get("merge_ocr_text", True)),
+        )
+    except ValueError as exc:
+        conn.close()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    conn.commit()
+    conn.close()
+    return {"success": True, **result}
+
+
+# ==================== 族谱归档（全量格式） ====================
+
+@app.get("/api/families/{family_id}/archive")
+async def export_family_archive(family_id: str):
+    conn = get_db()
+    c = conn.cursor()
+    try:
+        archive = build_family_archive(c, family_id)
+    except ValueError as exc:
+        conn.close()
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    conn.close()
+    return {"success": True, "archive": archive, "schema": ARCHIVE_SCHEMA}
+
+
+@app.get("/api/archive/export")
+async def export_user_archive(x_user_id: Optional[str] = Header(None, alias="X-User-Id")):
+    conn = get_db()
+    c = conn.cursor()
+    uid = resolve_user_id(c, x_user_id)
+    archive = build_user_archive(c, uid)
+    conn.close()
+    return {"success": True, "archive": archive, "schema": ARCHIVE_SCHEMA}
+
+
+@app.post("/api/archive/import")
+async def import_archive(data: dict, x_user_id: Optional[str] = Header(None, alias="X-User-Id")):
+    conn = get_db()
+    c = conn.cursor()
+    uid = resolve_user_id(c, x_user_id)
+    payload = data.get("archive") or data
+    if payload.get("family_archives"):
+        imported = []
+        for item in payload.get("family_archives") or []:
+            res = import_family_archive(c, item, owner_user_id=uid)
+            assign_family_owner(c, res["family_id"], uid)
+            imported.append(res)
+        conn.commit()
+        conn.close()
+        return {"success": True, "imported": imported}
+    res = import_family_archive(c, payload, owner_user_id=uid)
+    assign_family_owner(c, res["family_id"], uid)
+    conn.commit()
+    conn.close()
+    return {"success": True, **res}
+
+
+# ==================== GEDCOM 国际格式 ====================
+
+@app.get("/api/families/{family_id}/gedcom/export")
+async def export_family_gedcom(family_id: str):
+    from fastapi.responses import PlainTextResponse
+
+    conn = get_db()
+    c = conn.cursor()
+    family = c.execute("SELECT * FROM families WHERE id = ?", (family_id,)).fetchone()
+    if not family:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Family not found")
+    persons = [dict(p) for p in c.execute("SELECT * FROM persons WHERE family_id = ?", (family_id,)).fetchall()]
+    relations = [dict(r) for r in c.execute("SELECT * FROM relations WHERE family_id = ?", (family_id,)).fetchall()]
+    conn.close()
+    gedcom = export_family_to_gedcom(dict(family), persons, relations)
+    fname = (family["name"] or "family").replace(" ", "_")
+    return PlainTextResponse(
+        gedcom,
+        media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{fname}.ged"'},
+    )
+
+
+@app.post("/api/families/{family_id}/gedcom/import")
+async def import_family_gedcom(family_id: str, data: dict):
+    """将 GEDCOM 文本合并导入到指定族谱（或新建成员）。"""
+    text = data.get("gedcom") or data.get("text") or ""
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="Missing gedcom text")
+    parsed = import_gedcom_text(text)
+    conn = get_db()
+    c = conn.cursor()
+    family = c.execute("SELECT * FROM families WHERE id = ?", (family_id,)).fetchone()
+    if not family:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Family not found")
+    now = datetime.now().isoformat()
+    id_map: dict[str, str] = {}
+    for p in parsed.get("persons") or []:
+        old = p.get("id")
+        pid = str(uuid.uuid4())[:8]
+        id_map[old] = pid
+        c.execute(
+            """INSERT INTO persons (id, family_id, name, gender, birth_year, death_year, status, created_at,
+               courtesy_name, art_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                pid, family_id, p.get("name"), p.get("gender"), p.get("birth_year"), p.get("death_year"),
+                "confirmed", now, p.get("courtesy_name"), p.get("art_name"),
+            ),
+        )
+    for r in parsed.get("relations") or []:
+        rid = str(uuid.uuid4())[:8]
+        c.execute(
+            """INSERT INTO relations (id, family_id, from_person_id, to_person_id, relation_type, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                rid, family_id,
+                id_map.get(r.get("from_person_id"), r.get("from_person_id")),
+                id_map.get(r.get("to_person_id"), r.get("to_person_id")),
+                r.get("relation_type") or "parent_child",
+                now,
+            ),
+        )
+    conn.commit()
+    conn.close()
+    return {
+        "success": True,
+        "person_count": len(id_map),
+        "relation_count": len(parsed.get("relations") or []),
+    }
+
+
+@app.post("/api/gedcom/import")
+async def import_gedcom_new_family(data: dict, x_user_id: Optional[str] = Header(None, alias="X-User-Id")):
+    """从 GEDCOM 新建一族谱。"""
+    text = data.get("gedcom") or data.get("text") or ""
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="Missing gedcom text")
+    parsed = import_gedcom_text(text, default_surname=data.get("surname") or "")
+    conn = get_db()
+    c = conn.cursor()
+    uid = resolve_user_id(c, x_user_id)
+    archive = {
+        "family": parsed["family"],
+        "persons": [{"native": p} for p in parsed["persons"]],
+        "relations": [{"native": r} for r in parsed["relations"]],
+        "source_versions": [],
+    }
+    res = import_family_archive(c, archive, owner_user_id=uid)
+    assign_family_owner(c, res["family_id"], uid)
+    conn.commit()
+    conn.close()
+    return {"success": True, **res}
+
+
 # ==================== 导出/导入 ====================
 
 @app.get("/api/families/{family_id}/export")
@@ -3588,6 +4513,206 @@ async def import_family(data: dict):
     conn.commit()
     conn.close()
     return {"id": fid, "success": True}
+
+    return {"success": True, **result}
+
+
+# ==================== 族谱智能体 · 定时整理 / 发现 / 大库 ====================
+
+@app.get("/api/agent/schedule")
+async def get_agent_schedule(x_user_id: Optional[str] = Header(None, alias="X-User-Id")):
+    conn = get_db()
+    c = conn.cursor()
+    uid = resolve_user_id(c, x_user_id)
+    settings = get_schedule_settings(c, uid)
+    last_run = get_last_scan_run(c, uid)
+    pending = count_pending_discoveries(c, uid)
+    conn.close()
+    return {"success": True, "settings": settings, "last_scan": last_run, "pending_discoveries": pending}
+
+
+@app.put("/api/agent/schedule")
+async def update_agent_schedule(
+    data: dict = Body(...),
+    x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+):
+    conn = get_db()
+    c = conn.cursor()
+    uid = resolve_user_id(c, x_user_id)
+    try:
+        settings = save_schedule_settings(c, uid, data or {})
+        conn.commit()
+    except (TypeError, ValueError) as exc:
+        conn.rollback()
+        conn.close()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except sqlite3.Error as exc:
+        conn.rollback()
+        conn.close()
+        raise HTTPException(status_code=500, detail="保存设置失败，请重启后端后重试") from exc
+    conn.close()
+    return {"success": True, "settings": settings}
+
+
+@app.get("/api/agent/discoveries")
+async def get_agent_discoveries(
+    family_id: Optional[str] = None,
+    status: Optional[str] = "pending",
+    x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+):
+    conn = get_db()
+    c = conn.cursor()
+    uid = resolve_user_id(c, x_user_id)
+    items = list_discoveries(c, uid, family_id=family_id, status=status or None)
+    conn.close()
+    return {"success": True, "discoveries": items, "count": len(items)}
+
+
+@app.post("/api/agent/discoveries/{discovery_id}/dismiss")
+async def dismiss_agent_discovery(
+    discovery_id: str,
+    x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+):
+    conn = get_db()
+    c = conn.cursor()
+    uid = resolve_user_id(c, x_user_id)
+    ok = update_discovery_status(c, discovery_id, uid, "dismissed")
+    pending = count_pending_discoveries(c, uid)
+    conn.commit()
+    conn.close()
+    if not ok:
+        raise HTTPException(status_code=404, detail="发现不存在")
+    return {"success": True, "pending_discoveries": pending}
+
+
+@app.post("/api/agent/discoveries/{discovery_id}/accept")
+async def accept_agent_discovery(
+    discovery_id: str,
+    x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+):
+    conn = get_db()
+    c = conn.cursor()
+    uid = resolve_user_id(c, x_user_id)
+    item = get_discovery(c, discovery_id, uid)
+    if not item:
+        conn.close()
+        raise HTTPException(status_code=404, detail="发现不存在")
+    update_discovery_status(c, discovery_id, uid, "accepted")
+    pending = count_pending_discoveries(c, uid)
+    conn.commit()
+    conn.close()
+    return {
+        "success": True,
+        "family_id": item.get("family_id"),
+        "plan": item.get("plan"),
+        "discovery_type": item.get("discovery_type"),
+        "pending_discoveries": pending,
+    }
+
+
+@app.post("/api/agent/genealogy-scan")
+async def trigger_agent_scan(
+    data: dict | None = None,
+    x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+):
+    data = data or {}
+    conn = get_db()
+    c = conn.cursor()
+    uid = resolve_user_id(c, x_user_id)
+    family_ids = data.get("family_ids")
+    if family_ids is not None and not isinstance(family_ids, list):
+        family_ids = None
+    result = run_agent_scan(
+        c, uid,
+        trigger=str(data.get("trigger") or "manual"),
+        family_ids=family_ids,
+    )
+    conn.commit()
+    conn.close()
+    return result
+
+
+@app.post("/api/agent/genealogy-scan/on-open")
+async def trigger_agent_scan_on_open(
+    x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+):
+    conn = get_db()
+    c = conn.cursor()
+    uid = resolve_user_id(c, x_user_id)
+    if not should_run_on_open(c, uid):
+        pending = count_pending_discoveries(c, uid)
+        conn.close()
+        return {"success": True, "skipped": True, "reason": "recently_scanned", "pending_discoveries": pending}
+    result = run_agent_scan(c, uid, trigger="on_open")
+    conn.commit()
+    conn.close()
+    return result
+
+
+@app.get("/api/genealogy-snapshots")
+async def get_genealogy_snapshots(x_user_id: Optional[str] = Header(None, alias="X-User-Id")):
+    conn = get_db()
+    c = conn.cursor()
+    uid = resolve_user_id(c, x_user_id)
+    items = list_snapshots(c, uid)
+    conn.close()
+    return {"success": True, "snapshots": items}
+
+
+@app.post("/api/genealogy-snapshots")
+async def post_genealogy_snapshot(
+    data: dict,
+    x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+):
+    conn = get_db()
+    c = conn.cursor()
+    uid = resolve_user_id(c, x_user_id)
+    snap = create_snapshot(c, uid, data or {})
+    conn.commit()
+    conn.close()
+    return {"success": True, "snapshot": snap}
+
+
+@app.post("/api/genealogy-snapshots/from-family/{family_id}")
+async def post_genealogy_snapshot_from_family(
+    family_id: str,
+    data: dict | None = None,
+    x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+):
+    data = data or {}
+    conn = get_db()
+    c = conn.cursor()
+    uid = resolve_user_id(c, x_user_id)
+    family = c.execute("SELECT * FROM families WHERE id = ?", (family_id,)).fetchone()
+    if not family:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Family not found")
+    archive = build_family_archive(c, family_id)
+    snap = create_snapshot(c, uid, {
+        "name": data.get("name") or f"{family['name']} · 快照",
+        "description": data.get("description") or "",
+        "archive": archive,
+    })
+    conn.commit()
+    conn.close()
+    return {"success": True, "snapshot": snap}
+
+
+@app.delete("/api/genealogy-snapshots/{snapshot_id}")
+async def delete_genealogy_snapshot(
+    snapshot_id: str,
+    x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+):
+    conn = get_db()
+    c = conn.cursor()
+    uid = resolve_user_id(c, x_user_id)
+    ok = delete_snapshot(c, snapshot_id, uid)
+    conn.commit()
+    conn.close()
+    if not ok:
+        raise HTTPException(status_code=404, detail="快照不存在")
+    return {"success": True}
+
 
 # 静态文件
 dist_path = os.path.join(os.path.dirname(__file__), "../dist")

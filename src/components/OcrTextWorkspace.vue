@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { uploadImageUrl } from '../utils/uploadImageUrl'
+import SourceImageZoom from './SourceImageZoom.vue'
 import {
   type NameAnnotation,
   NAME_DRAG_MIME,
@@ -8,6 +10,7 @@ import {
   makeAnnotationId,
   mergeAnnotations,
   remapAnnotations,
+  renameAnnotationInText,
 } from '../utils/ocrAnnotations'
 import {
   isValidPersonNameForMark,
@@ -19,35 +22,44 @@ import { API_BASE } from '../main'
 import GenealogyCardTreeView from './view/GenealogyCardTreeView.vue'
 import SourceSilkwormPageView from './view/SourceSilkwormPageView.vue'
 
-export type SourceViewMode = 'page' | 'card' | 'edit'
+export type SourceViewMode = 'pair' | 'page' | 'card' | 'edit'
 
 const props = withDefaults(
   defineProps<{
     modelValue: string
     annotations?: NameAnnotation[]
     imagePreview?: string
+    imagePath?: string
     compact?: boolean
     relationLinkFrom?: string | null
     previewPersons?: any[]
     previewRelations?: any[]
     structuredText?: string
     viewTitle?: string
+    /** 版本一 OCR 对照编辑：有图时默认打开对照模式 */
+    preferPairEdit?: boolean
+    /** 扫描/录入流程：隐藏谱页卡片等次要 Tab，界面更简洁 */
+    minimal?: boolean
   }>(),
   {
     annotations: () => [],
     imagePreview: '',
+    imagePath: '',
     compact: false,
     relationLinkFrom: null,
     previewPersons: () => [],
     previewRelations: () => [],
     structuredText: '',
     viewTitle: '族谱',
+    preferPairEdit: true,
+    minimal: false,
   },
 )
 
 const emit = defineEmits<{
   'update:modelValue': [value: string]
   'update:annotations': [value: NameAnnotation[]]
+  'upload-image': [file: File]
   'add-person': [payload: { name: string; source: string; start?: number; end?: number }]
   'set-link-from': [name: string]
   'create-link': [payload: { from: string; to: string }]
@@ -58,8 +70,31 @@ const textareaRef = ref<HTMLTextAreaElement | null>(null)
 const aiLoading = ref(false)
 const copyHint = ref('')
 const selectionHint = ref('')
-const viewMode = ref<SourceViewMode>('page')
+const viewMode = ref<SourceViewMode>('edit')
+const imageInputRef = ref<HTMLInputElement | null>(null)
+
+const imageSrc = computed(() => uploadImageUrl(props.imagePath, props.imagePreview))
+
+const showPairMode = computed(() => Boolean(imageSrc.value) || props.preferPairEdit)
+
+watch(
+  () => [imageSrc.value, props.preferPairEdit] as const,
+  () => {
+    if (imageSrc.value && props.preferPairEdit && viewMode.value !== 'pair') {
+      viewMode.value = 'pair'
+    }
+  },
+  { immediate: true },
+)
+
+function onImageFileChange(e: Event) {
+  const file = (e.target as HTMLInputElement).files?.[0]
+  if (file) emit('upload-image', file)
+  if (imageInputRef.value) imageInputRef.value.value = ''
+}
 const dragOverTray = ref(false)
+const editingAnnId = ref<string | null>(null)
+const editingAnnName = ref('')
 const selectedRange = ref<{ start: number; end: number; text: string } | null>(null)
 
 const localText = computed({
@@ -244,32 +279,101 @@ function onTrayDrop(e: DragEvent) {
 
 function removeAnnotation(id: string) {
   localAnnotations.value = localAnnotations.value.filter((a) => a.id !== id)
+  if (editingAnnId.value === id) {
+    editingAnnId.value = null
+    editingAnnName.value = ''
+  }
+}
+
+function startEditAnnotation(ann: NameAnnotation) {
+  editingAnnId.value = ann.id
+  editingAnnName.value = ann.name
+}
+
+function commitEditAnnotation() {
+  const id = editingAnnId.value
+  if (!id) return
+  const next = editingAnnName.value.trim()
+  if (!next) {
+    removeAnnotation(id)
+    editingAnnId.value = null
+    return
+  }
+  const { text, annotations } = renameAnnotationInText(localText.value, localAnnotations.value, id, next)
+  localText.value = text
+  localAnnotations.value = annotations
+  editingAnnId.value = null
+  editingAnnName.value = ''
+  selectionHint.value = `已修正姓名为「${next}」`
 }
 </script>
 
 <template>
-  <div class="ocr-text-workspace" :class="{ compact }">
-    <div v-if="imagePreview && viewMode === 'edit'" class="ocr-text-image">
-      <img :src="imagePreview" alt="扫描原图" />
-    </div>
-
+  <div class="ocr-text-workspace" :class="{ compact, 'ocr-text-workspace--pair': viewMode === 'pair' }">
     <div class="ocr-text-main">
       <div class="ocr-text-toolbar ocr-view-toolbar">
         <div class="ocr-view-mode-group" role="tablist" aria-label="查看模式">
-          <button type="button" role="tab" class="ocr-view-mode-btn" :class="{ active: viewMode === 'page' }" @click="viewMode = 'page'">谱页</button>
-          <button type="button" role="tab" class="ocr-view-mode-btn" :class="{ active: viewMode === 'card' }" @click="viewMode = 'card'">卡片</button>
-          <button type="button" role="tab" class="ocr-view-mode-btn" :class="{ active: viewMode === 'edit' }" @click="viewMode = 'edit'">编辑</button>
+          <button
+            v-if="showPairMode"
+            type="button"
+            role="tab"
+            class="ocr-view-mode-btn"
+            :class="{ active: viewMode === 'pair' }"
+            @click="viewMode = 'pair'"
+          >
+            对照
+          </button>
+          <template v-if="!minimal">
+            <button type="button" role="tab" class="ocr-view-mode-btn" :class="{ active: viewMode === 'page' }" @click="viewMode = 'page'">谱页</button>
+            <button type="button" role="tab" class="ocr-view-mode-btn" :class="{ active: viewMode === 'card' }" @click="viewMode = 'card'">卡片</button>
+          </template>
+          <button type="button" role="tab" class="ocr-view-mode-btn" :class="{ active: viewMode === 'edit' }" @click="viewMode = 'edit'">纯文字</button>
         </div>
-        <template v-if="viewMode === 'edit'">
+        <template v-if="viewMode === 'pair' || viewMode === 'edit'">
           <button type="button" class="btn-xs" @click="copyAllText">{{ copyHint || '复制全文' }}</button>
           <button type="button" class="btn-xs btn-primary" :disabled="!canMarkSelection" @click="markSelectionAsName">变为姓名标签</button>
           <button type="button" class="btn-xs" :disabled="aiLoading || !localText.trim()" @click="aiExtractNames">{{ aiLoading ? 'AI 识别中…' : 'AI 识别人名' }}</button>
+          <button type="button" class="btn-xs" @click="imageInputRef?.click()">{{ imageSrc ? '更换原图' : '上传原图' }}</button>
+          <input ref="imageInputRef" type="file" accept="image/*" class="ocr-image-file-input" @change="onImageFileChange" />
         </template>
-        <span v-if="viewMode === 'edit' && selectionHint" class="ocr-text-hint">{{ selectionHint }}</span>
+        <span v-if="(viewMode === 'pair' || viewMode === 'edit') && selectionHint" class="ocr-text-hint">{{ selectionHint }}</span>
+      </div>
+
+      <div v-if="viewMode === 'pair'" class="ocr-pair-split">
+        <SourceImageZoom :src="imageSrc" alt="版本一对照原图" />
+        <div class="ocr-pair-editor">
+          <p class="ocr-text-tip ocr-pair-tip">左侧原图与右侧<strong>版本一 OCR 原文</strong>一一对应校对；改字后请点「保存原文」。</p>
+          <textarea
+            ref="textareaRef"
+            v-model="localText"
+            class="ocr-text-editor ocr-text-editor--pair"
+            placeholder="版本一 OCR 原文，对照左侧图片逐行修改…"
+            spellcheck="false"
+            @mouseup="readSelection"
+            @keyup="readSelection"
+            @dblclick="onTextareaDblClick"
+          />
+          <div v-if="textSegments.length" class="ocr-text-preview">
+            <div class="ocr-text-preview-label">标注预览（高亮姓名可拖动）</div>
+            <div class="ocr-text-preview-body">
+              <template v-for="seg in textSegments" :key="seg.key">
+                <mark
+                  v-if="seg.type === 'name'"
+                  class="name-highlight name-highlight-draggable"
+                  draggable="true"
+                  :title="'拖动「' + seg.text + '」到族谱'"
+                  @dragstart="onMarkDragStart($event, seg.annotationId)"
+                  @click="onMarkClick(seg.annotationId)"
+                >{{ seg.text }}</mark>
+                <span v-else>{{ seg.text }}</span>
+              </template>
+            </div>
+          </div>
+        </div>
       </div>
 
       <SourceSilkwormPageView
-        v-if="viewMode === 'page'"
+        v-else-if="viewMode === 'page'"
         :persons="previewPersons"
         :relations="previewRelations"
         :structured-text="structuredText"
@@ -319,7 +423,7 @@ function removeAnnotation(id: string) {
     </div>
 
     <div
-      v-if="viewMode === 'edit'"
+      v-if="viewMode === 'pair' || viewMode === 'edit'"
       class="ocr-name-tray"
       :class="{ 'drag-over': dragOverTray }"
       @dragover="onTrayDragOver"
@@ -331,23 +435,35 @@ function removeAnnotation(id: string) {
         <span class="hint">{{ uniqueNames.length }} 个</span>
         <span v-if="relationLinkFrom" class="link-mode-badge">连线中：{{ relationLinkFrom }}</span>
       </div>
-      <div v-if="!uniqueNames.length" class="ocr-name-tray-empty">选中文字生成标签，或使用 AI 识别人名</div>
+      <div v-if="!uniqueNames.length" class="ocr-name-tray-empty">选中文字生成标签；点 ✎ 可改错字姓名</div>
       <div v-else class="ocr-name-chips">
-        <button
-          v-for="ann in uniqueNames"
-          :key="ann.id"
-          type="button"
-          class="name-chip"
-          :class="['source-' + ann.source, { 'link-active': relationLinkFrom === ann.name }]"
-          draggable="true"
-          :title="'拖动到族谱；Shift+点击设关系起点'"
-          @dragstart="onDragStart($event, ann)"
-          @click="onChipClick(ann, $event)"
-        >
-          <span class="name-chip-text">{{ ann.name }}</span>
-          <span class="name-chip-badge">{{ ann.source === 'ai' ? 'AI' : '手' }}</span>
-          <span class="name-chip-remove" @click.stop="removeAnnotation(ann.id)">×</span>
-        </button>
+        <template v-for="ann in uniqueNames" :key="ann.id">
+          <div v-if="editingAnnId === ann.id" class="name-chip-edit">
+            <input
+              v-model="editingAnnName"
+              class="name-chip-input"
+              maxlength="8"
+              @keydown.enter.prevent="commitEditAnnotation"
+              @keydown.esc.prevent="editingAnnId = null"
+            />
+            <button type="button" class="btn-xs" @click="commitEditAnnotation">确定</button>
+          </div>
+          <button
+            v-else
+            type="button"
+            class="name-chip"
+            :class="['source-' + ann.source, { 'link-active': relationLinkFrom === ann.name }]"
+            draggable="true"
+            :title="'拖动到族谱；✎ 改姓名'"
+            @dragstart="onDragStart($event, ann)"
+            @click="onChipClick(ann, $event)"
+          >
+            <span class="name-chip-text">{{ ann.name }}</span>
+            <span class="name-chip-badge">{{ ann.source === 'ai' ? 'AI' : '手' }}</span>
+            <span class="name-chip-edit-btn" @click.stop="startEditAnnotation(ann)">✎</span>
+            <span class="name-chip-remove" @click.stop="removeAnnotation(ann.id)">×</span>
+          </button>
+        </template>
       </div>
     </div>
   </div>

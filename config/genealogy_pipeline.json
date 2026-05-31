@@ -1,0 +1,145 @@
+{
+  "$schema": "./genealogy_pipeline.schema.json",
+  "version": "1.0",
+  "description": "族谱文字整理 → 关系解析 → 图谱展示 流水线配置（Agent / OCR / 规则引擎共用）",
+
+  "architecture": {
+    "principle": "文字是源真相，图谱是可视化；数据库只持久化已确认的结构化结果",
+    "layers": [
+      {
+        "id": "source_versions",
+        "role": "原文版本库（SQLite family_source_versions）",
+        "note": "版本一 OCR、版本二关系描述、版本三修正稿；可反复 AI 重生，不必手打"
+      },
+      {
+        "id": "rule_parser",
+        "role": "确定性规则解析（genealogy_builder / name_extractor）",
+        "note": "无 AI 也能从关系描述稿提取人名与关系，供实时预览"
+      },
+      {
+        "id": "ai_assist",
+        "role": "AI 辅助（OCR / 关系描述 / 整理方案）",
+        "note": "输出必须符合 relation_text_format，再由规则层校验"
+      },
+      {
+        "id": "genealogy_db",
+        "role": "主谱库（persons + relations）",
+        "note": "用户确认「写入主谱」后才入库；带 confidence / status"
+      },
+      {
+        "id": "view_graph",
+        "role": "图谱 UI（关系图 / 卡片 / 垂丝）",
+        "note": "读 persons+relations 或临时解析 structuredText 预览，不另存一套"
+      }
+    ]
+  },
+
+  "pipeline_stages": [
+    {
+      "id": "ocr_raw",
+      "kind": "ocr_raw",
+      "label": "版本一 · OCR 原文",
+      "goal": "忠实转写谱页文字，保留阅读顺序，不整理关系",
+      "prompt_key": "ocr",
+      "save_action": "保存版本一",
+      "regenerate_phrases": ["重新识别扫描图", "再次生成完整 OCR", "OCR 不对"]
+    },
+    {
+      "id": "relation_desc",
+      "kind": "relation_desc",
+      "label": "版本二 · 关系描述稿",
+      "goal": "结构化人物行 + 可读父子/配偶关系，供规则引擎与 AI 数字化",
+      "prompt_key": "relation_describe",
+      "depends_on": "ocr_raw",
+      "save_action": "保存版本二",
+      "regenerate_phrases": ["重新生成关系描述", "关系文字不对", "自动再生成填进去"]
+    },
+    {
+      "id": "custom",
+      "kind": "custom",
+      "label": "版本三 · 修正稿",
+      "goal": "人工或 AI 校对后的定稿，优先级高于版本二",
+      "depends_on": "relation_desc",
+      "save_action": "保存版本三"
+    },
+    {
+      "id": "preview",
+      "kind": "preview",
+      "label": "整理预览 / smart-suggest",
+      "goal": "关系描述 → 规则解析 → 关系图预览，与主谱 diff",
+      "depends_on": "relation_desc",
+      "endpoint": "smart-suggest"
+    },
+    {
+      "id": "genealogy",
+      "kind": "genealogy",
+      "label": "主谱（数据库）",
+      "goal": "确认后的 persons + relations，图谱 UI 的数据源",
+      "depends_on": "preview",
+      "save_action": "写入主谱"
+    }
+  ],
+
+  "relation_text_format": {
+    "hint": "每行一人，或一行写清「姓名 + 配偶 + 子女」；世代用「一世 / 第2世」标在行首。",
+    "line_template": "{generation} {name} {gender} [字{courtesy}] [生{birth}] [卒{death}] [配{spouse}] [子{children}]",
+    "recommended_line_example": "一世 张公 男 字德明 生1920 配李氏 子张三,张四",
+    "relation_block_header": "【关系】",
+    "relation_syntax": [
+      { "type": "parent_child", "patterns": ["{parent} → {child}（父子）", "{parent} 子 {child}", "行内 子:名1,名2"], "direction": "from_parent_to_child" },
+      { "type": "spouse", "patterns": ["{a} 配 {b}", "配{spouse}"], "direction": "undirected" }
+    ],
+    "generation_markers": ["一世", "二世", "第N世", "第N代"],
+    "field_markers": {
+      "gender": ["男", "女"],
+      "courtesy": ["字"],
+      "birth": ["生", "生于"],
+      "death": ["卒", "殁"],
+      "spouse": ["配", "娶", "妻", "室"],
+      "children": ["子", "之子", "嗣子", "女", "之女"]
+    },
+    "rules": [
+      "每行对应一个真实人物，或一行写清配偶与子女列表",
+      "父子：子名跟在父名后，或单独一行「父名 → 子名」",
+      "配偶：用「配某某」或「A 配 B」",
+      "不要把「一世」「谱序」「长子」当作人名",
+      "不确定的字用 [] 标注，不得编造原文没有的人名"
+    ],
+    "forbidden_as_names": [
+      "族谱", "家谱", "宗谱", "谱序", "碑记", "世系", "世次",
+      "长子", "次子", "三子", "之子", "之女", "儿子", "女儿",
+      "一世", "二世", "三世", "第一代", "第二代",
+      "生于", "卒于", "享年", "配氏", "说明", "备注"
+    ]
+  },
+
+  "digitize": {
+    "prompt_key": "digitize",
+    "relation_types": ["parent_child", "spouse"],
+    "person_name_length": [1, 4],
+    "require_every_person_in_relations": true,
+    "conflict_priority": ["custom", "relation_desc", "genealogy_db", "ocr_raw"]
+  },
+
+  "validation": {
+    "preview_before_apply": [
+      { "id": "parseable_names", "description": "至少解析出 2 个有效人名", "severity": "error" },
+      { "id": "parseable_relations", "description": "至少 1 条父子或配偶关系", "severity": "error" },
+      { "id": "no_forbidden_names", "description": "人名不在 forbidden_as_names 中", "severity": "error" },
+      { "id": "generation_consistent", "description": "子代世代 > 父代（警告）", "severity": "warning" },
+      { "id": "birth_before_death", "description": "生年不晚于卒年", "severity": "error" },
+      { "id": "duplicate_names", "description": "同名同世提示核对", "severity": "warning" },
+      { "id": "orphan_persons", "description": "无人际关系的孤立节点（警告）", "severity": "warning" },
+      { "id": "graph_renderable", "description": "关系图至少能布局出节点", "severity": "error" }
+    ],
+    "note": "100% 自动可靠不现实：AI 负责草稿，规则+人工核对负责可靠。预览通过后再写入主谱。"
+  },
+
+  "agent_guidance": {
+    "workflow_summary": "图→字(版本一)→关系文字(版本二)→预览关系图→确认写入主谱(数据库)。保存版本与写入主谱是两步。",
+    "when_ocr_wrong": "regenerate_source_version kind=ocr_raw（需扫描图 + OCR 模型）",
+    "when_relation_wrong": "regenerate_source_version kind=relation_desc（需版本一文字 + 解析模型）",
+    "when_structure_wrong": "propose_organize_plan 或整理 Tab 预览后写入主谱",
+    "never_skip": ["版本二格式规范", "预览关系图核对", "写入前 diff 对比"]
+  }
+}

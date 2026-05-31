@@ -3,6 +3,7 @@ import type { AgentUiAction } from './types'
 const TAB_LABELS: Record<string, string> = {
   tree: '树图',
   source: '原文',
+  fusion: '融合',
   person: '成员',
   diff: '对比',
   organize: '整理',
@@ -23,6 +24,7 @@ export type GenealogyUiHandlers = {
   openClassic?: (panel?: string) => void
   openSettings?: () => void
   openScan?: () => void
+  organizeRegenerate?: (target: string, synced?: boolean) => void | Promise<void>
   selectFamily?: (familyId: string) => void
   scan?: () => void
   createFamily?: () => void
@@ -51,6 +53,9 @@ export function describeUiAction(action: AgentUiAction): string | null {
   if (action.type === 'select_family') return '已打开族谱'
   if (action.type === 'scan') return '打开扫描建谱'
   if (action.type === 'create_family') return '新建族谱'
+  if (action.type === 'organize_regenerate') {
+    return action.target === 'ocr_raw' ? '正在重新识别版本一…' : '正在重新生成关系描述…'
+  }
   return null
 }
 
@@ -74,6 +79,9 @@ export function applyGenealogyUiActions(
     if (a.type === 'open_classic') handlers.openClassic?.(a.panel)
     if (a.type === 'open_settings') handlers.openSettings?.()
     if (a.type === 'open_scan') handlers.openScan?.()
+    if (a.type === 'organize_regenerate' && a.target) {
+      void handlers.organizeRegenerate?.(a.target, Boolean(a.synced))
+    }
     if (a.type === 'select_family' && a.family_id) handlers.selectFamily?.(a.family_id)
     if (a.type === 'scan') handlers.scan?.()
     if (a.type === 'create_family') handlers.createFamily?.()

@@ -13,6 +13,7 @@ from agent.parser import extract_json_content, _strip_llm_wrappers
 from agent.tool_executor import (
     AiFn,
     execute_read_tool,
+    execute_regenerate_source_tool,
     propose_organize_tool,
     propose_write_tool,
 )
@@ -21,11 +22,13 @@ ChatFn = Callable[[list[dict[str, str]]], Awaitable[tuple[str, str]]]
 
 READ_TOOLS = frozenset({
     "search_persons", "query_relatives", "find_relationship", "get_person_detail",
-    "get_source_text", "ui_switch_tab", "ui_focus_person",
+    "get_source_text", "fuse_source_versions", "regenerate_source_version",
+    "ui_switch_tab", "ui_focus_person",
     "ui_set_anchor", "ui_open_classic", "ui_open_settings", "ui_open_scan",
 })
 WRITE_TOOLS = frozenset({
     "propose_person_patch", "propose_sync_person_details", "propose_organize_plan",
+    "propose_save_fusion", "propose_merge_family",
 })
 
 
@@ -36,6 +39,7 @@ class LlmAgentDeps:
     ai_configured: bool
     cursor: Any = None
     family_id: str = ""
+    user_id: str = "local-default"
     source_text: str = ""
     source_excerpt_fn: Callable[[str], str] | None = None
     message_history: list[dict] | None = None
@@ -55,6 +59,7 @@ def build_agent_system_prompt(
     *,
     anchor_name: str = "",
     selected_name: str = "",
+    other_families: list[dict] | None = None,
 ) -> str:
     tool_doc = """
 可用工具（仅在需要查库/改库/切页时 call_tool，一次一个）：
@@ -65,7 +70,9 @@ def build_agent_system_prompt(
 - find_relationship: { "person_a": "...", "person_b": "..." }
 - get_person_detail: { "person_name"?, "use_selected"? }
 - get_source_text: {}
-- ui_switch_tab: { "tab": "tree|source|person|diff|organize" }
+- fuse_source_versions: { "include_tree"?: true }  — 融合各版原文与主谱关系，生成逐步文字稿
+- regenerate_source_version: { "kind": "ocr_raw"|"relation_desc" }  — AI 重新生成并写入版本一 OCR 或版本二关系描述
+- ui_switch_tab: { "tab": "tree|source|fusion|person|diff|organize" }
 - ui_focus_person: { "person_name": "..." }
 - ui_set_anchor: { "person_name": "...", "use_selected"? }
 - ui_open_classic: { "panel"?: "organize|source|export|search" }
@@ -78,7 +85,20 @@ def build_agent_system_prompt(
   courtesy_name, art_name, county, town, village, biography
 - propose_sync_person_details: {}
 - propose_organize_plan: { "message": "整理意图" }
+- propose_save_fusion: { "stepped_text"?: "..." }  — 保存融合稿为原文版本（可先 fuse_source_versions）
+- propose_merge_family: { "source_family_id"?: "...", "source_family_name"?: "..." }
+  — 将另一份族谱增量合并进当前族谱：同名更新字段、新人/新关系追加、OCR 原文拼接。须用户确认。
 """
+    other_families_line = ""
+    if other_families:
+        parts = [
+            f"{f.get('name', '?')}({f.get('id', '')})"
+            for f in other_families[:20]
+            if f.get("id") != context.family_id
+        ]
+        if parts:
+            other_families_line = f"\n- 可合并的其他族谱: {'、'.join(parts)}"
+
     return f"""你是「族见」身具智能的家族智能体（ReSee），使命是「见家族，见自己」。
 
 ## 产品原则（Agent-first）
@@ -91,7 +111,7 @@ def build_agent_system_prompt(
 - Tab: {context.active_tab}
 - 我在谱中: {anchor_name or "未设置"}
 - 选中成员: {selected_name or "无"}
-- 成员（节选）: {_compact_person_names(persons)}
+- 成员（节选）: {_compact_person_names(persons)}{other_families_line}
 
 ## 行为
 1. **大部分问题**（解释、建议、闲聊、问法不清）：action=reply_only，在 reply 里完整回答。
@@ -100,7 +120,17 @@ def build_agent_system_prompt(
 4. **用户用自然语言描述成员资料**（如「张三字子明第三世」「把字号改成醉翁」）：
    必须 call_tool propose_person_patch，从描述里提取字段填入 patch，禁止只文字回复让用户手填表单。
 5. **切页面/定位/设身份/经典编辑/设置/扫描**：用 ui_switch_tab、ui_focus_person、ui_set_anchor、ui_open_classic、ui_open_settings、ui_open_scan，让用户看见结果。
-6. 「他/她/当前成员」→ params 里 use_selected 或 use_anchor。
+6. **整理族谱**：用户说「整理族谱/补全关系/理谱」→ ui_switch_tab("organize")；有具体意图时用 propose_organize_plan，方案会出现在整理 Tab 预览区，用户核对后点「写入主谱」。
+7. **合并族谱**：用户说「把 A 族谱合并进当前谱/合并两份族谱」→ call_tool propose_merge_family，params 填 source_family_name 或 source_family_id；合并前会展示预览，用户确认后才写入。
+7. **三版流水线问答**（版本一 OCR / 版本二关系描述 / 版本三修正）：用 reply_only 直接解释，不要只列功能菜单。
+   - 关系文字 → 整理 Tab 中间栏编辑 → **保存版本二**（覆盖旧稿）→ 预览无误 → **写入主谱**
+   - 「保存版本」存文字稿，「写入主谱」改族谱结构，是两步
+   - 版本二乱的可 AI 重生关系描述或手工改完再存；可 ui_switch_tab("organize")
+8. **AI 重生原文**（不必手打）：
+   - OCR 不对 / 「再次生成完整」/ 重新识别 → regenerate_source_version kind=ocr_raw（需已上传扫描图）
+   - 关系描述不对 / 重新整理关系文字 → regenerate_source_version kind=relation_desc（需有版本一）
+   - 工具会自动写入对应版本并打开整理页，回复里给字数与节选即可
+9. 「他/她/当前成员」→ params 里 use_selected 或 use_anchor。
 
 {tool_doc}
 
@@ -188,8 +218,18 @@ async def run_agent_turn_llm(
     if context.selected_person_id:
         selected_name = (graph.get_person(context.selected_person_id) or {}).get("name") or ""
 
+    other_families: list[dict] = []
+    if deps.cursor and deps.user_id:
+        try:
+            from user_store import list_owned_families
+
+            other_families = list_owned_families(deps.cursor, deps.user_id)
+        except Exception:
+            other_families = []
+
     system = build_agent_system_prompt(
         context, persons, anchor_name=anchor_name, selected_name=selected_name,
+        other_families=other_families,
     )
     chat_messages = _build_chat_messages(system, deps.message_history, message)
 
@@ -217,16 +257,39 @@ async def run_agent_turn_llm(
     tool_name = decision.get("tool") or ""
     params = decision.get("params") or {}
     llm_reply = decision.get("reply") or ""
+    other_families: list[dict] = []
+    if deps.cursor and deps.user_id:
+        try:
+            from user_store import list_owned_families
+
+            other_families = list_owned_families(deps.cursor, deps.user_id)
+        except Exception:
+            other_families = []
+
     ctx = {
         "anchor_person_id": context.anchor_person_id,
         "selected_person_id": context.selected_person_id,
         "source_text": deps.source_text,
+        "user_id": deps.user_id,
+        "other_families": other_families,
     }
 
     if tool_name in READ_TOOLS:
+        if tool_name == "regenerate_source_version":
+            result = await execute_regenerate_source_tool(
+                params,
+                cursor=deps.cursor,
+                family_id=deps.family_id,
+                ai_configured=deps.ai_configured,
+            )
+            if result.success and not llm_reply:
+                llm_reply = await _summarize_with_llm(deps, message, tool_name, result.summary)
+            return _tool_result_to_turn(result, llm_reply=llm_reply)
+
         result = execute_read_tool(
             tool_name, params, graph=graph, persons=persons, context=ctx,
             source_excerpt_fn=deps.source_excerpt_fn, source_text=deps.source_text,
+            cursor=deps.cursor, family_id=deps.family_id, relations=relations,
         )
         if result.success and not llm_reply:
             llm_reply = await _summarize_with_llm(deps, message, tool_name, result.summary)
@@ -247,7 +310,7 @@ async def run_agent_turn_llm(
                 return AgentTurnResult(reply="写操作需要数据库上下文。", state_patch={"_used_llm": True})
             result = propose_write_tool(
                 tool_name, params, cursor=deps.cursor, family_id=deps.family_id,
-                graph=graph, persons=persons, context=ctx,
+                graph=graph, persons=persons, relations=relations, context=ctx,
             )
         if not result.success:
             return AgentTurnResult(

@@ -4,8 +4,10 @@ import {
   type OrganizePlan,
   type OrganizeDiff,
   planHasChanges,
+  pickDefaultApplyMode,
   relLabel,
 } from '../types/organize'
+import { api, API_TIMEOUT_LONG } from '../utils/api'
 
 const props = defineProps<{
   familyId: string
@@ -18,23 +20,65 @@ const props = defineProps<{
   cleanSlate: boolean
   sourceVersionId?: string
   sourceVersionLabel?: string
+  sourceText?: string
+  /** 嵌入整理工作台：隐藏顶部说明与「长对话」入口 */
+  embedded?: boolean
 }>()
 
 const emit = defineEmits<{
   'update:applyMode': [value: 'merge' | 'replace']
   'update:cleanSlate': [value: boolean]
   'update:plan': [value: OrganizePlan]
+  'load-plan': [payload: { plan: OrganizePlan; diff: OrganizeDiff | null }]
   applied: [stats?: Record<string, number>]
   cleared: []
-  'open-ai-chat': []
   dismiss: []
   'plan-edited': []
   notify: [message: string, type?: 'success' | 'error' | 'info']
 }>()
 
 const API = '/api'
+const API_LONG = 300000
 const applying = ref(false)
 const clearing = ref(false)
+const smartLoading = ref(false)
+const aiLoading = ref(false)
+const chatInput = ref('')
+const showAdvancedEditor = ref(false)
+const autoRanFamilies = new Set<string>()
+
+const AI_PRESETS = [
+  {
+    key: 'full',
+    label: 'AI 整理全谱',
+    hint: '从原文提取全部人物关系',
+    prompt: '请根据附带的族谱原文，干净整理出完整主谱：提取所有人物、世代与父子/配偶关系，给出可应用的整理方案。',
+    cleanSlate: true,
+  },
+  {
+    key: 'gaps',
+    label: '补缺失关系',
+    hint: '只补主谱里没有的边',
+    prompt: '对比原文与当前主谱，只补充缺失的父子/配偶关系；已有成员不要重复添加到 new_persons。',
+    cleanSlate: false,
+  },
+  {
+    key: 'spouse',
+    label: '整理配偶',
+    hint: '识别配/妻/夫',
+    prompt: '重点从原文中整理配偶关系（配、妻、夫），补全 relations_add，尽量不改已有父子结构。',
+    cleanSlate: false,
+  },
+  {
+    key: 'branch',
+    label: '整理选中支',
+    hint: '需先在左侧选中成员',
+    prompt: '',
+    cleanSlate: false,
+    needsSelection: true,
+  },
+] as const
+
 const newRelFrom = ref('')
 const newRelTo = ref('')
 const newRelType = ref<'parent_child' | 'spouse'>('parent_child')
@@ -76,6 +120,14 @@ const isEmptyGenealogy = computed(() => props.memberCount <= 0)
 
 const planRelations = computed(() => props.plan?.relations_add || [])
 
+const personsToAdd = computed(() => props.diff?.persons_to_add || [])
+
+const relationCards = computed(() => {
+  const fromDiff = props.diff?.relations_to_add
+  if (fromDiff?.length) return fromDiff
+  return planRelations.value
+})
+
 const suspiciousDuplicateAdd = computed(() => {
   const addCount = props.diff?.persons_to_add?.length || 0
   return props.memberCount > 0 && addCount > Math.max(3, Math.floor(props.memberCount * 0.3))
@@ -95,7 +147,16 @@ function updateRelationField(index: number, field: 'from' | 'to' | 'type', value
 }
 
 function removeRelationAt(index: number) {
-  const list = planRelations.value.filter((_, i) => i !== index)
+  const card = relationCards.value[index]
+  if (!card) return
+  const list = planRelations.value.filter(
+    (r) =>
+      !(
+        r.from === card.from
+        && r.to === card.to
+        && (r.type || 'parent_child') === (card.type || 'parent_child')
+      ),
+  )
   patchPlan({ relations_add: list })
 }
 
@@ -155,17 +216,133 @@ const cleanSlateModel = computed({
   set: (v: boolean) => emit('update:cleanSlate', v),
 })
 
-async function api(method: string, path: string, data?: unknown) {
-  const res = await fetch(`${API}${path}`, {
-    method,
-    headers: { 'Content-Type': 'application/json' },
-    body: data ? JSON.stringify(data) : undefined,
-  })
-  const text = await res.text()
+watch(
+  () => [props.familyId, props.plan] as const,
+  ([fid, plan]) => {
+    if (props.embedded || !fid || plan || autoRanFamilies.has(fid)) return
+    autoRanFamilies.add(fid)
+    void runSmartSuggest(false)
+  },
+  { immediate: true },
+)
+
+function absorbPlanResponse(res: {
+  plan?: OrganizePlan | null
+  diff?: OrganizeDiff | null
+  explanation?: string
+}) {
+  if (!res.plan || !planHasChanges(res.plan)) {
+    notify(res.explanation || '未产生可应用的整理变更', 'info')
+    return false
+  }
+  emit('load-plan', { plan: res.plan, diff: res.diff ?? null })
+  if (props.memberCount <= 0) {
+    emit('update:applyMode', 'replace')
+  } else {
+    emit('update:applyMode', pickDefaultApplyMode(res, { memberCount: props.memberCount }))
+  }
+  return true
+}
+
+async function runSmartSuggest(showNotice = true) {
+  if (!props.familyId || smartLoading.value) return
+  smartLoading.value = true
   try {
-    return JSON.parse(text)
+    const res = await api('POST', `/families/${props.familyId}/smart-suggest`, {
+      source_version_id: props.sourceVersionId || undefined,
+    })
+    if (!res.success) {
+      if (showNotice) notify(res.error || res.detail || '智能分析失败', 'error')
+      return
+    }
+    const ok = absorbPlanResponse(res)
+    if (showNotice && ok) {
+      const st = res.stats || {}
+      notify(
+        `智能分析完成：+${st.persons_to_add || 0} 人 · +${st.relations_to_add || 0} 关系`,
+        'success',
+      )
+    } else if (showNotice && !ok) {
+      notify(res.plan?.explanation || '原文与主谱已基本一致', 'info')
+    }
   } catch {
-    return { success: false, error: text.slice(0, 120) }
+    if (showNotice) notify('智能分析失败，请确认后端已启动', 'error')
+  } finally {
+    smartLoading.value = false
+  }
+}
+
+async function runAiPreset(preset: (typeof AI_PRESETS)[number]) {
+  if (!props.familyId || aiLoading.value) return
+  if (preset.needsSelection && !props.selectedPersonName) {
+    notify('请先在左侧世代导航选中一位成员', 'info')
+    return
+  }
+  let message = preset.prompt
+  if (preset.key === 'branch' && props.selectedPersonName) {
+    message = `请围绕「${props.selectedPersonName}」及其上下几代，从原文整理并补全父子/配偶关系；不要重复添加主谱已有成员。`
+  }
+  if (preset.cleanSlate) emit('update:cleanSlate', true)
+  aiLoading.value = true
+  try {
+    const res = await api(
+      'POST',
+      `/families/${props.familyId}/ai-organize`,
+      {
+        message,
+        include_source: Boolean((props.sourceText || '').trim()),
+        source_text: props.sourceText || undefined,
+        source_version_id: props.sourceVersionId || undefined,
+        clean_slate: preset.cleanSlate,
+        refresh_context: true,
+      },
+      API_TIMEOUT_LONG,
+    )
+    if (!res.success) {
+      notify(res.explanation || res.error || res.detail || 'AI 整理失败', 'error')
+      return
+    }
+    if (absorbPlanResponse(res)) {
+      notify('AI 方案已生成，请核对下方关系卡片后一键应用', 'success')
+    }
+  } catch {
+    notify('AI 请求失败', 'error')
+  } finally {
+    aiLoading.value = false
+  }
+}
+
+async function sendInlineChat() {
+  const text = chatInput.value.trim()
+  if (!text || aiLoading.value) return
+  chatInput.value = ''
+  aiLoading.value = true
+  try {
+    const res = await api(
+      'POST',
+      `/families/${props.familyId}/ai-organize`,
+      {
+        message: text,
+        include_source: Boolean((props.sourceText || '').trim()),
+        source_text: props.sourceText || undefined,
+        source_version_id: props.sourceVersionId || undefined,
+        clean_slate: props.cleanSlate,
+      },
+      API_TIMEOUT_LONG,
+    )
+    if (!res.success) {
+      notify(res.explanation || res.error || '整理失败', 'error')
+      return
+    }
+    if (absorbPlanResponse(res)) {
+      notify('已更新整理方案', 'success')
+    } else {
+      notify(res.explanation || 'AI 已回复，本次无结构变更', 'info')
+    }
+  } catch {
+    notify('请求失败', 'error')
+  } finally {
+    aiLoading.value = false
   }
 }
 
@@ -271,18 +448,104 @@ async function applyPlan(skipReplaceConfirm = false) {
 </script>
 
 <template>
-  <div class="workspace-drawer organize-drawer">
-    <div class="organize-drawer-header">
+  <div class="organize-drawer" :class="{ 'workspace-drawer': !embedded, 'organize-drawer--embedded': embedded }">
+    <div v-if="!embedded" class="organize-drawer-header">
       <div>
-        <h4>族谱整理</h4>
-        <p class="hint organize-drawer-hint">
-          基于上方「原文」里当前选中的版本预览文字稿（不会自动切换版本）；在此应用 AI 方案或清空主谱。
-        </p>
+        <h4>整理组谱</h4>
+        <p class="hint organize-drawer-hint">点按钮自动分析关系，核对卡片后一键写入主谱。</p>
       </div>
-      <button type="button" class="btn-xs btn-primary" @click="emit('open-ai-chat')">打开 AI 对话</button>
     </div>
 
-    <details v-if="textPreview || textPreviewLoading" class="organize-text-preview ai-organize-details" open>
+    <section
+      v-if="embedded && (!plan || !planHasChanges(plan))"
+      class="organize-smart-hub organize-smart-hub--embedded-mini"
+      aria-label="AI 整理"
+    >
+      <div class="organize-smart-chips">
+        <button
+          type="button"
+          class="organize-smart-chip"
+          :disabled="smartLoading || aiLoading"
+          @click="runSmartSuggest(true)"
+        >
+          ⚡ 智能分析
+        </button>
+        <button
+          v-for="p in AI_PRESETS.slice(0, 3)"
+          :key="p.key"
+          type="button"
+          class="organize-smart-chip"
+          :disabled="aiLoading || smartLoading || (p.needsSelection && !selectedPersonName)"
+          :title="p.hint"
+          @click="runAiPreset(p)"
+        >
+          {{ p.label }}
+        </button>
+      </div>
+      <div class="organize-inline-chat">
+        <input
+          v-model="chatInput"
+          class="input organize-inline-chat-input"
+          placeholder="问 AI：如「把张三的儿子都连上」"
+          :disabled="aiLoading"
+          @keydown.enter.prevent="sendInlineChat"
+        />
+        <button
+          type="button"
+          class="btn-primary btn-sm"
+          :disabled="!chatInput.trim() || aiLoading"
+          @click="sendInlineChat"
+        >
+          {{ aiLoading ? '…' : '问 AI' }}
+        </button>
+      </div>
+    </section>
+
+    <section v-if="!embedded" class="organize-smart-hub" aria-label="整理快捷操作">
+      <div class="organize-smart-primary">
+        <button
+          type="button"
+          class="btn-primary btn-sm organize-smart-btn-main"
+          :disabled="smartLoading || aiLoading"
+          @click="runSmartSuggest(true)"
+        >
+          {{ smartLoading ? '分析中…' : '⚡ 智能分析原文' }}
+        </button>
+        <span class="hint organize-smart-hint">秒级本地分析，无需等待 AI</span>
+      </div>
+      <div class="organize-smart-chips">
+        <button
+          v-for="p in AI_PRESETS"
+          :key="p.key"
+          type="button"
+          class="organize-smart-chip"
+          :disabled="aiLoading || smartLoading || (p.needsSelection && !selectedPersonName)"
+          :title="p.hint"
+          @click="runAiPreset(p)"
+        >
+          {{ p.label }}
+        </button>
+      </div>
+      <div class="organize-inline-chat">
+        <input
+          v-model="chatInput"
+          class="input organize-inline-chat-input"
+          placeholder="或输入：如「把张三的儿子都连上」「王氏配给谁」"
+          :disabled="aiLoading"
+          @keydown.enter.prevent="sendInlineChat"
+        />
+        <button
+          type="button"
+          class="btn-primary btn-sm"
+          :disabled="!chatInput.trim() || aiLoading"
+          @click="sendInlineChat"
+        >
+          {{ aiLoading ? '…' : '问 AI' }}
+        </button>
+      </div>
+    </section>
+
+    <details v-if="!embedded && (textPreview || textPreviewLoading)" class="organize-text-preview ai-organize-details">
       <summary>
         文字版预览（{{ textPreviewLabel || '当前原文' }}）{{ textPreviewLoading ? '…' : '' }}
       </summary>
@@ -318,13 +581,17 @@ async function applyPlan(skipReplaceConfirm = false) {
 
     <div v-if="!plan || !planHasChanges(plan)" class="organize-empty">
       <p v-if="plan && plan.explanation" class="organize-ai-note">{{ plan.explanation }}</p>
-      <p v-else class="hint">暂无待应用的 AI 方案。可点「打开 AI 对话」描述整理意图，方案会显示在此处。</p>
+      <p v-else-if="smartLoading || aiLoading" class="hint">正在分析…</p>
+      <p v-else class="hint">点上方「智能分析原文」或 AI 快捷按钮，关系建议会显示在下方卡片中。</p>
     </div>
 
     <div v-else class="ai-organize-preview organize-plan-panel">
       <div class="organize-plan-header">
-        <strong>待应用方案</strong>
-        <button v-if="plan" type="button" class="btn-xs" @click="emit('dismiss')">清除方案</button>
+        <strong>整理预览</strong>
+        <div class="organize-plan-header-actions">
+          <button type="button" class="btn-xs" :disabled="smartLoading" @click="runSmartSuggest(true)">重新分析</button>
+          <button v-if="plan" type="button" class="btn-xs" @click="emit('dismiss')">清除</button>
+        </div>
       </div>
       <p v-if="plan?.explanation" class="organize-plan-explanation">{{ plan.explanation }}</p>
 
@@ -368,7 +635,7 @@ async function applyPlan(skipReplaceConfirm = false) {
           :disabled="applying"
           @click="applyPlan()"
         >
-          {{ applying ? '写入中…' : applyMode === 'replace' ? '应用到主谱（替换写入）' : '应用到主谱（插入合并）' }}
+          {{ applying ? '写入中…' : applyMode === 'replace' ? '应用到主谱（替换）' : '应用到主谱（合并）' }}
         </button>
       </div>
 
@@ -380,25 +647,6 @@ async function applyPlan(skipReplaceConfirm = false) {
         <span v-if="applyDiagnostics.skipped_relations?.length">
           ；跳过关系 {{ applyDiagnostics.skipped_relations.length }} 条
         </span>
-      </div>
-
-      <div class="organize-quick-apply">
-        <button
-          type="button"
-          class="btn-sm"
-          :disabled="applying || isEmptyGenealogy"
-          @click="applyQuick('merge')"
-        >
-          {{ applying && applyMode === 'merge' ? '写入中…' : '插入到现有主谱' }}
-        </button>
-        <button
-          type="button"
-          class="btn-primary btn-sm"
-          :disabled="applying"
-          @click="applyQuick('replace')"
-        >
-          {{ applying && applyMode === 'replace' ? '写入中…' : '替换写入主谱' }}
-        </button>
       </div>
 
       <div v-if="diff" class="ai-organize-diff-stats">
@@ -421,26 +669,42 @@ async function applyPlan(skipReplaceConfirm = false) {
         <li v-for="(h, i) in diff.hints" :key="'h' + i">{{ h }}</li>
       </ul>
 
-      <details v-if="diff?.persons_to_add?.length" class="ai-organize-details" open>
-        <summary>将新增成员（{{ diff.persons_to_add.length }}）— 可删除误识别的重复项</summary>
-        <ul class="organize-editable-list">
-          <li v-for="name in diff.persons_to_add" :key="'np-' + name" class="organize-editable-row">
-            <span>{{ name }}</span>
-            <button type="button" class="btn-xs" @click="removeNewPerson(name)">删除</button>
-          </li>
-        </ul>
-      </details>
-      <details v-if="diff?.persons_to_update?.length" class="ai-organize-details">
-        <summary>将更新成员（{{ diff.persons_to_update.length }}）</summary>
-        <ul>
-          <li v-for="(p, j) in diff.persons_to_update" :key="'u' + j">
-            {{ p.name }}（{{ (p.fields || []).join('、') || '资料' }}）
-          </li>
-        </ul>
-      </details>
-      <details v-if="planRelations.length" class="ai-organize-details organize-editable-relations" open>
-        <summary>方案关系（{{ planRelations.length }}）— 可直接编辑或删除</summary>
-        <div class="organize-relation-editor">
+      <div v-if="personsToAdd.length" class="organize-person-chips">
+        <span class="organize-person-chips-label">将新增 {{ personsToAdd.length }} 人</span>
+        <button
+          v-for="name in personsToAdd"
+          :key="'np-' + name"
+          type="button"
+          class="organize-person-chip"
+          @click="removeNewPerson(name)"
+        >
+          {{ name }} ×
+        </button>
+      </div>
+
+      <div v-if="relationCards.length" class="organize-relation-cards-wrap">
+        <div class="organize-relation-cards-head">
+          <strong>关系卡片（{{ relationCards.length }}）</strong>
+          <span class="hint">点 × 移除误识别项</span>
+        </div>
+        <div class="organize-relation-cards">
+          <article
+            v-for="(r, j) in relationCards"
+            :key="'rc-' + j + r.from + r.to"
+            class="organize-relation-card"
+            :class="r.type === 'spouse' ? 'organize-relation-card--spouse' : 'organize-relation-card--parent'"
+          >
+            <span class="organize-relation-card-from">{{ r.from }}</span>
+            <span class="organize-relation-card-mid">{{ r.type === 'spouse' ? '配' : '→' }}</span>
+            <span class="organize-relation-card-to">{{ r.to }}</span>
+            <button type="button" class="organize-relation-card-remove" title="移除此关系" @click="removeRelationAt(j)">×</button>
+          </article>
+        </div>
+      </div>
+
+      <details v-if="planRelations.length" class="ai-organize-details organize-advanced-editor">
+        <summary @click="showAdvancedEditor = !showAdvancedEditor">高级：逐条编辑关系</summary>
+        <div v-if="showAdvancedEditor" class="organize-relation-editor">
           <div
             v-for="(r, j) in planRelations"
             :key="'edit-' + j"
@@ -481,10 +745,12 @@ async function applyPlan(skipReplaceConfirm = false) {
           </div>
         </div>
       </details>
-      <details v-if="diff?.relations_to_add?.length && diff.relations_to_add.length !== planRelations.length" class="ai-organize-details">
-        <summary>相对主谱将新增（{{ diff.relations_to_add.length }}）</summary>
+      <details v-if="diff?.persons_to_update?.length" class="ai-organize-details">
+        <summary>将更新成员资料（{{ diff.persons_to_update.length }}）</summary>
         <ul>
-          <li v-for="(r, j) in diff.relations_to_add" :key="'a' + j">{{ relLabel(r) }}</li>
+          <li v-for="(p, j) in diff.persons_to_update" :key="'u' + j">
+            {{ p.name }}（{{ (p.fields || []).join('、') || '资料' }}）
+          </li>
         </ul>
       </details>
       <details v-if="diff?.relations_to_remove?.length" class="ai-organize-details">

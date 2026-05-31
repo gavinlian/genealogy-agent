@@ -24,6 +24,7 @@ export type AgentUiActionType =
   | 'select_family'
   | 'scan'
   | 'create_family'
+  | 'organize_regenerate'
 
 export type AgentUiAction = {
   type: AgentUiActionType | string
@@ -33,6 +34,9 @@ export type AgentUiAction = {
   name?: string
   draft?: Record<string, unknown>
   family_id?: string
+  /** organize_regenerate: ocr_raw | relation_desc */
+  target?: string
+  synced?: boolean
 }
 
 export type AgentConfirmation = {

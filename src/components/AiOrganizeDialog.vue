@@ -37,7 +37,7 @@ const includeSource = ref(true)
 const showSourcePreview = ref(false)
 const textareaRef = ref<HTMLTextAreaElement | null>(null)
 const welcomeMsg =
-  '请用自然语言描述您希望的主谱效果。我会列出关系变更建议；实际应用请在主界面「族谱整理」面板操作。'
+  '可直接点下方快捷按钮，或描述整理意图。方案会出现在「智能整理」的关系卡片中。'
 const BOOTSTRAP_PROMPT =
   '请根据附带的族谱原文，干净整理出完整主谱：提取所有人物、世代与父子/配偶关系，给出可应用的整理方案。'
 const messages = ref<ChatMsg[]>([{ role: 'assistant', content: welcomeMsg }])
@@ -245,6 +245,12 @@ function bootstrapFromSource() {
   nextTick(() => textareaRef.value?.focus())
 }
 
+async function quickSend(message: string) {
+  input.value = message
+  includeSource.value = true
+  await sendMessage()
+}
+
 function applyInitialPrompt() {
   const prompt = (props.initialPrompt || '').trim() || (props.bootstrapFromSource ? BOOTSTRAP_PROMPT : '')
   if (!prompt) return
@@ -328,35 +334,22 @@ onMounted(() => {
   <div class="modal ai-organize-modal" @click.self="emit('close')">
     <div class="modal-content modal-lg ai-organize-panel ai-organize-panel--chat">
       <div class="ai-settings-header">
-        <h3>AI 对话助手</h3>
+        <h3>AI 整理对话</h3>
         <div class="ai-organize-header-actions">
-          <button type="button" class="btn-xs btn-secondary" :disabled="sending" @click="refreshAgentContext">
-            刷新主谱上下文
-          </button>
           <button type="button" class="btn-xs btn-secondary" :disabled="sending" @click="clearChatSession">
-            清空对话
+            清空
           </button>
           <button class="btn-close" type="button" @click="emit('close')">×</button>
         </div>
       </div>
 
       <p class="hint ai-organize-hint">
-        此处仅用于与 AI 对话、列出关系建议。清空主谱、应用方案请在主界面「族谱整理」面板完成。
-        <span v-if="agentTurnCount > 0" class="ai-organize-model">
-          会话第 {{ agentTurnCount }} 轮 · {{ agentContextMode === 'full' ? '完整上下文' : '摘要模式' }}
-        </span>
-        <span v-if="sourceVersionLabel" class="ai-organize-model">当前原文：{{ sourceVersionLabel }}</span>
-        <span v-if="parseModelHint" class="ai-organize-model">关系解析模型：{{ parseModelHint }}</span>
+        与 AI 对话获取整理方案；应用请用「智能整理」面板中的关系卡片。
+        <span v-if="sourceVersionLabel" class="ai-organize-model"> · {{ sourceVersionLabel }}</span>
       </p>
 
-      <div v-if="agentContextMode === 'summary' && agentTurnCount > 0" class="ai-organize-context-banner">
-        当前为<strong>摘要模式</strong>：为节省 token，不再附带完整主谱。若需对照原文或全量主谱，请勾选「附带原文」或点「刷新主谱上下文」。
-      </div>
       <div v-if="sourceTruncated" class="ai-organize-context-banner ai-organize-context-banner--warn">
-        原文超过 12000 字，本轮仅发送前 12000 字。建议分次整理，或先在「原文」抽屉中精简。
-      </div>
-      <div v-if="agentTurnCount >= 1 && !includeSource && hasSource && !lastSourceIncluded" class="ai-organize-context-banner">
-        第 2 轮起默认不附带原文（可在下方重新勾选「附带原文」）。
+        原文超过 12000 字，本轮仅发送前段。建议分次整理。
       </div>
 
       <div class="ai-organize-chat">
@@ -372,7 +365,7 @@ onMounted(() => {
       </div>
 
       <div v-if="lastPlan && planHasChanges(lastPlan)" class="ai-organize-preview ai-organize-preview--compact">
-        <strong>关系摘要（详情见「族谱整理」）</strong>
+        <strong>关系摘要（详情见「智能整理」）</strong>
         <ul class="ai-organize-compact-list">
           <li v-if="planSummary(lastPlan)!.addRel">新增关系 {{ planSummary(lastPlan)!.addRel }} 条</li>
           <li v-if="planSummary(lastPlan)!.removeRel">删除关系 {{ planSummary(lastPlan)!.removeRel }} 条</li>
@@ -386,20 +379,19 @@ onMounted(() => {
         </details>
       </div>
 
+      <div v-if="hasSource" class="ai-organize-quick-chips">
+        <button type="button" class="btn-xs" :disabled="sending" @click="quickSend('只补主谱缺失的父子/配偶关系，不要重复添加已有成员')">补缺失关系</button>
+        <button type="button" class="btn-xs" :disabled="sending" @click="quickSend('重点整理配偶关系（配、妻、夫）')">整理配偶</button>
+        <button type="button" class="btn-xs" :disabled="sending" @click="quickSend('检查并合并重复成员，统一姓名写法')">合并重复</button>
+      </div>
+
       <div v-if="hasSource" class="ai-organize-source-bar">
-        <button class="btn-xs btn-secondary" type="button" :disabled="sending" @click="insertSourceText">
-          {{ inputAlreadyHasSource() ? '原文已在输入框' : '插入原文' }}
-        </button>
         <button class="btn-xs btn-primary" type="button" :disabled="sending || !hasSource" @click="bootstrapFromSource">
-          从原文生成方案
+          从原文一键整理
         </button>
         <label class="ai-organize-source-toggle">
           <input v-model="includeSource" type="checkbox" :disabled="sending" />
           附带原文（{{ sourceCharCount }} 字）
-        </label>
-        <label class="ai-organize-source-toggle">
-          <input v-model="cleanSlateModel" type="checkbox" :disabled="sending" />
-          干净整理
         </label>
       </div>
       <p v-else class="hint ai-organize-no-source">暂无原文，可在顶栏「原文」中粘贴后再对话。</p>

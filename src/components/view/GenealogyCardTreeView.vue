@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import { resolveViewData } from '../../utils/genealogyViewData'
 import { layoutCardTree, CARD_W, CARD_H, SIDEBAR_W } from '../../utils/cardTreeLayout'
+import { buildFocusNeighborhood, isPersonFocused } from '../../utils/focusNeighborhood'
 
 const props = withDefaults(defineProps<{
   persons?: any[]
@@ -33,20 +34,32 @@ const data = computed(() =>
 )
 
 const layout = computed(() => layoutCardTree(data.value.persons, data.value.relations))
+
+const focusNeighborhood = computed(() =>
+  buildFocusNeighborhood(data.value.persons, data.value.relations, props.selectedName),
+)
+const hasFocus = computed(() => Boolean(props.selectedName))
+
+function personFocused(id: string) {
+  return isPersonFocused(id, focusNeighborhood.value, hasFocus.value)
+}
 </script>
 
 <template>
   <div class="zupu-card-view" role="region" aria-label="卡片世代树">
     <header class="zupu-card-view-header">
       <h3 class="zupu-card-view-title">{{ title }}</h3>
-      <span v-if="data.persons.length" class="zupu-card-view-meta">{{ data.persons.length }} 人</span>
+      <span v-if="data.persons.length" class="zupu-card-view-meta">
+        {{ data.persons.length }} 人
+        <template v-if="data.relations.length"> · {{ data.relations.length }} 关系</template>
+      </span>
     </header>
 
     <div v-if="!data.persons.length" class="zupu-view-empty">
       完成关系整理后可在此按世代浏览（参考族谱 App · 卡片模式）
     </div>
 
-    <div v-else class="zupu-card-view-scroll" :class="{ 'zupu-card-view-scroll--unbounded': unbounded }">
+    <div v-else class="zupu-card-view-scroll" :class="{ 'zupu-card-view-scroll--unbounded': unbounded, 'zupu-card-view-scroll--focus': hasFocus }">
       <div
         class="zupu-card-view-canvas"
         :style="{ width: layout.width + 'px', minHeight: layout.height + 'px' }"
@@ -94,7 +107,11 @@ const layout = computed(() => layoutCardTree(data.value.persons, data.value.rela
                 class="zupu-person-card"
                 :class="[
                   'zupu-person-card--' + p.gender,
-                  { 'zupu-person-card--selected': selectedName === p.name },
+                  {
+                    'zupu-person-card--selected': selectedName === p.name,
+                    'zupu-person-card--dimmed': hasFocus && !personFocused(p.id),
+                    'zupu-person-card--focused': hasFocus && personFocused(p.id),
+                  },
                 ]"
                 :style="{ width: CARD_W + 'px', height: CARD_H + 'px' }"
                 @click="emit('select', p.name)"

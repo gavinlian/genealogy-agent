@@ -17,6 +17,7 @@ from agent.agent_tools import (
     ui_open_classic,
     ui_open_scan,
     ui_open_settings,
+    ui_organize_regenerate,
     ui_set_anchor,
     ui_switch_tab,
 )
@@ -108,6 +109,86 @@ def _extract_focus_name(message: str) -> str | None:
     if m:
         return m.group(1)
     return None
+
+
+def _is_version_workflow_question(message: str) -> bool:
+    """用户询问三版流水线、关系文字存哪一版等流程问题（非执行整理）。"""
+    if not re.search(r"版本[一二三四123]|关系描述|关系文字|OCR\s*原文", message, re.I):
+        return False
+    if re.search(
+        r"整理好的文字|填到|写入|保存到|存到|覆盖|要不要|是不是|是否应该|"
+        r"怎么(?:保存|写|填)|之前.*(?:没|未).*(?:整理|写好)",
+        message,
+    ):
+        return True
+    if re.search(r"(?:怎么|如何|什么).*(?:版本|流程|区别)", message):
+        return True
+    return False
+
+
+def _version_workflow_reply() -> str:
+    return (
+        "关于「整理好的文字」与版本：\n\n"
+        "**三版流水线**\n"
+        "- **版本一**：OCR 原文（图转字的原始稿）\n"
+        "- **版本二**：关系描述稿（结构化父子/配偶关系，供解析成族谱）\n"
+        "- **版本三**：修正稿（可选，校对后的定稿）\n\n"
+        "**整理 Tab 中间栏**编辑的就是关系描述。确认无误后：\n"
+        "1. 点 **「保存版本二」** → 写入/覆盖版本二（之前乱的可以直接改完再存）\n"
+        "2. 右侧预览关系图无误后，点 **「写入主谱」** → 应用到族谱结构\n\n"
+        "所以：**关系文字应保存到版本二**（若已有修正稿则用版本三）。"
+        "「保存版本」与「写入主谱」是两步——前者存文字稿，后者改族谱。\n\n"
+        "**不用手打**：可说「重新识别扫描图」「再次生成完整 OCR」或「重新生成关系描述」，"
+        "AI 会自动写入对应版本。\n\n"
+        "若版本二从未整理好，可在整理页点 **「AI 重生关系描述」**，或在对话里直接说。\n\n"
+        "已为您打开【整理】页，可直接在中间栏编辑并保存。"
+    )
+
+
+def _detect_regenerate_kind(message: str) -> str | None:
+    """识别用户要 AI 重生版本一 OCR 还是版本二关系描述。"""
+    msg = message.strip()
+    mentions_v1 = bool(re.search(r"版本\s*[一1]|OCR|扫描(?:图|识别)?|识别(?:出来)?的?(?:文字|原文)", msg, re.I))
+    mentions_v2 = bool(re.search(r"版本\s*[二2三3]|关系(?:描述|文字)|整理.*关系", msg, re.I))
+
+    ocr_action = re.search(
+        r"重新(?:识别|OCR|扫描)|再次(?:生成|识别)|重做(?:OCR|识别)?|"
+        r"OCR(?:不对|有误|错了|不准)|识别(?:不对|有误|错了|不准)|"
+        r"请(?:再|重新).*(?:生成|识别).*(?:完整|全文)?|扫描.*(?:不对|错了)",
+        msg,
+        re.I,
+    )
+    rel_action = re.search(
+        r"重新(?:生成|整理|做|写)|再次生成|重生|自动(?:再)?(?:生成|填)|"
+        r"关系(?:描述|文字)(?:不对|有误|错了|不准)|"
+        r"整理(?:关系|文字).*(?:不对|错了)|填进去",
+        msg,
+        re.I,
+    )
+
+    if ocr_action and (mentions_v1 or not mentions_v2):
+        return "ocr_raw"
+    if rel_action and (mentions_v2 or not mentions_v1):
+        return "relation_desc"
+    if ocr_action and not rel_action:
+        return "ocr_raw"
+    if rel_action and not ocr_action:
+        return "relation_desc"
+    if re.search(r"请再次生成完整|再次生成完整", msg):
+        return "ocr_raw"
+    return None
+
+
+def _regenerate_reply(kind: str) -> str:
+    if kind == "ocr_raw":
+        return (
+            "好的，正在用扫描图 **重新识别版本一 OCR** 并自动写入原文库…\n"
+            "（需已上传族谱图片且配置 OCR 模型，约需几十秒）"
+        )
+    return (
+        "好的，正在从版本一 OCR **重新生成版本二关系描述** 并自动填入…\n"
+        "（需已保存版本一文字且配置关系解析模型，完成后可在整理页预览并写入主谱）"
+    )
 
 
 CLASSIC_PANEL_ALIASES: dict[str, tuple[str, ...]] = {
@@ -332,18 +413,61 @@ def run_agent_turn(
             state_patch=state_patch,
         )
 
+    # 5a) AI 重生版本一 OCR / 版本二关系描述（对话触发，前端或 LLM 工具执行）
+    regen_kind = _detect_regenerate_kind(msg)
+    if regen_kind:
+        ui_actions.extend([ui_switch_tab("organize"), ui_organize_regenerate(regen_kind)])
+        state_patch["active_tab"] = "organize"
+        return AgentTurnResult(
+            reply=_regenerate_reply(regen_kind),
+            ui_actions=ui_actions,
+            tool_calls=[{"tool": "regenerate_source_version", "params": {"kind": regen_kind}}],
+            state_patch=state_patch,
+        )
+
+    # 5b) 三版流水线 / 关系文字存哪一版（流程问答，优先于整理执行）
+    if _is_version_workflow_question(msg):
+        ui_actions.append(ui_switch_tab("organize"))
+        state_patch["active_tab"] = "organize"
+        return AgentTurnResult(
+            reply=_version_workflow_reply(),
+            ui_actions=ui_actions,
+            tool_calls=[{"tool": "ui_switch_tab", "tab": "organize"}],
+            state_patch=state_patch,
+        )
+
+    # 5b) 整理族谱（无需说「打开」；排除「整理好的文字」等流程问句）
+    if re.search(
+        r"整理(?![好完成过得])(?:族谱|全谱|主谱|配偶)?|"
+        r"理谱|补全(?:缺失)?关系|智能整理|从原文整理|生成关系预览",
+        msg,
+    ) and not _is_version_workflow_question(msg):
+        ui_actions.append(ui_switch_tab("organize"))
+        state_patch["active_tab"] = "organize"
+        return AgentTurnResult(
+            reply=(
+                "已打开【整理】页。请按 图→字→关系文字 核对，右侧会实时预览关系图；"
+                "满意后在预览区点「写入主谱」。也可继续在这里说具体整理意图。"
+            ),
+            ui_actions=ui_actions,
+            tool_calls=[{"tool": "ui_switch_tab", "tab": "organize"}],
+            state_patch=state_patch,
+        )
+
     # 6) 帮助 / 默认
     return AgentTurnResult(
         reply=(
             "我可以帮您：\n"
+            "- 整理族谱：说「整理族谱」「补全关系」→ 打开整理页并实时预览\n"
+            "- AI 重生原文：「重新识别扫描图」「再次生成完整 OCR」「重新生成关系描述」\n"
             "- 查亲属：「我的堂兄弟有谁」（需先设置「我在谱中是谁」）\n"
-            "- 搜成员：「搜索张三」「查一下子明」\n"
+            "- 搜成员：「搜索张三」\n"
             "- 问关系：「张三和李四什么关系」\n"
-            "- 切页面：「打开文字版」「去看树图」\n"
+            "- 切页面：「打开原文」「去看树图」「打开融合」\n"
             "- 定位：「定位到张三」\n"
             "- 设身份：「我在谱中是张三」\n"
-            "- 经典编辑：「打开经典编辑整理」「打开导出」\n"
+            "- 经典编辑/导出/搜索：「打开经典编辑」「打开导出」\n"
             "- 设置/扫描：「打开设置」「扫描建谱」\n\n"
-            "也可直接点底部 Tab 切换页面，再告诉我怎么优化当前页。"
+            "也可直接点底部 Tab，再告诉我怎么优化当前页。"
         ),
     )

@@ -80,6 +80,16 @@ def ui_prefill_person(person_id: str, draft: dict[str, Any], *, person_name: str
     }
 
 
+def ui_organize_regenerate(target: str, *, synced: bool = False) -> dict[str, Any]:
+    """触发整理页 AI 重生：ocr_raw | relation_desc。"""
+    kind = (target or "relation_desc").strip().lower()
+    if kind in ("ocr", "v1", "version1", "ocr_raw"):
+        kind = "ocr_raw"
+    elif kind in ("relation", "v2", "version2", "relation_desc"):
+        kind = "relation_desc"
+    return {"type": "organize_regenerate", "target": kind, "synced": synced}
+
+
 def ui_set_anchor(person_id: str, name: str = "") -> dict[str, Any]:
     return {"type": "set_anchor", "person_id": person_id, "name": name}
 

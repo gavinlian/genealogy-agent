@@ -24,6 +24,7 @@ const props = defineProps<{
   showScan?: boolean
   showBackToChat?: boolean
   homeSessions?: HomeChatSession[]
+  quickPrompts?: string[]
 }>()
 
 const emit = defineEmits<{
@@ -206,6 +207,20 @@ watch(chatInput, () => nextTick(resizeComposer))
         >
           <strong>{{ m.meta.confirmation.title }}</strong>
           <p class="agent-confirm-summary">{{ m.meta.confirmation.summary }}</p>
+          <div v-if="m.meta.confirmation.details?.stats" class="agent-confirm-changes">
+            <div class="agent-confirm-change-row">
+              <span class="agent-confirm-change-field">新增成员</span>
+              <span class="agent-confirm-change-val">{{ m.meta.confirmation.details.stats.persons_to_add ?? 0 }} 人</span>
+            </div>
+            <div class="agent-confirm-change-row">
+              <span class="agent-confirm-change-field">更新成员</span>
+              <span class="agent-confirm-change-val">{{ m.meta.confirmation.details.stats.persons_to_update ?? 0 }} 人</span>
+            </div>
+            <div class="agent-confirm-change-row">
+              <span class="agent-confirm-change-field">追加关系</span>
+              <span class="agent-confirm-change-val">{{ m.meta.confirmation.details.stats.relations_to_add ?? 0 }} 条</span>
+            </div>
+          </div>
           <div v-if="m.meta.confirmation.details?.changes" class="agent-confirm-changes">
             <div
               v-for="(c, ci) in (m.meta.confirmation.details.changes as { field: string; from: unknown; to: unknown }[])"
@@ -240,6 +255,18 @@ watch(chatInput, () => nextTick(resizeComposer))
     </div>
 
     <form class="agent-composer" @submit.prevent="submitChat">
+      <div v-if="quickPrompts?.length" class="agent-quick-prompts">
+        <button
+          v-for="q in quickPrompts"
+          :key="q"
+          type="button"
+          class="agent-quick-prompt-chip"
+          :disabled="chatLoading"
+          @click="emit('send', q)"
+        >
+          {{ q }}
+        </button>
+      </div>
       <div class="agent-composer-box">
         <textarea
           ref="composerEl"

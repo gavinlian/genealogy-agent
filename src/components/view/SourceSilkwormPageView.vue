@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import { resolveViewData } from '../../utils/genealogyViewData'
 import { layoutSilkwormPage, NODE_W, NODE_H, GUTTER_W, PAD, ROW_H } from '../../utils/silkwormPageLayout'
+import { buildFocusNeighborhood, isPersonFocused } from '../../utils/focusNeighborhood'
 
 const props = withDefaults(defineProps<{
   persons?: any[]
@@ -36,6 +37,19 @@ const data = computed(() =>
 
 const layout = computed(() => layoutSilkwormPage(data.value.persons, data.value.relations))
 
+const hasTreeRelations = computed(() =>
+  data.value.relations.some((r) => r.type === 'parent_child'),
+)
+
+const focusNeighborhood = computed(() =>
+  buildFocusNeighborhood(data.value.persons, data.value.relations, props.selectedName),
+)
+const hasFocus = computed(() => Boolean(props.selectedName))
+
+function personFocused(id: string) {
+  return isPersonFocused(id, focusNeighborhood.value, hasFocus.value)
+}
+
 function genTop(gen: number) {
   const min = layout.value.generations[0] ?? gen
   return PAD + (gen - min) * ROW_H + 4
@@ -51,14 +65,18 @@ function genTop(gen: number) {
     <div class="zupu-page-view-frame">
       <header class="zupu-page-view-header">
         <span class="zupu-page-view-title">{{ title }}</span>
-        <span v-if="data.persons.length" class="zupu-page-view-meta">{{ data.persons.length }} 人 · 1/1</span>
+        <span v-if="data.persons.length" class="zupu-page-view-meta">
+          {{ data.persons.length }} 人
+          <template v-if="data.relations.length"> · {{ data.relations.length }} 关系</template>
+          <template v-if="!hasTreeRelations"> · 按世代平铺</template>
+        </span>
       </header>
 
       <div v-if="!data.persons.length" class="zupu-view-empty">
         暂无世系内容。版本二关系描述或解析完成后，将按旧谱样式展示（参考族谱 App · 谱页模式）
       </div>
 
-      <div v-else class="zupu-page-view-scroll" :class="{ 'zupu-page-view-scroll--unbounded': unbounded }">
+      <div v-else class="zupu-page-view-scroll" :class="{ 'zupu-page-view-scroll--unbounded': unbounded, 'zupu-page-view-scroll--focus': hasFocus }">
         <div
           class="zupu-page-view-canvas-wrap"
           :style="{ minWidth: layout.width + 'px', minHeight: layout.height + 'px' }"
@@ -100,7 +118,11 @@ function genTop(gen: number) {
               class="zupu-page-name-node"
               :class="[
                 'zupu-page-name-node--' + n.person.gender,
-                { 'zupu-page-name-node--selected': selectedName === n.person.name },
+                {
+                  'zupu-page-name-node--selected': selectedName === n.person.name,
+                  'zupu-page-name-node--dimmed': hasFocus && !personFocused(n.person.id),
+                  'zupu-page-name-node--focused': hasFocus && personFocused(n.person.id),
+                },
               ]"
               :style="{ left: n.x + 'px', top: n.y + 'px', width: NODE_W + 'px', minHeight: NODE_H + 'px' }"
               role="button"

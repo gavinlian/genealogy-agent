@@ -9,7 +9,7 @@ export const AGENT_REGISTRY: Record<string, AgentDefinition> = {
     icon: '见',
     tagline: '身具智能 · 见家族，见自己 · ReSee',
     placeholderHome: '用对话建谱、打开族谱、扫描录入…',
-    placeholderWorkspace: '对话操作族谱：查人、填资料、切页面、整理…',
+    placeholderWorkspace: '说「整理族谱」「搜索张三」「补全关系」…',
     welcomeHome:
       '你好，我是族见家族智能体 —— 身具智能，用对话即可操作族谱与家族相关功能。\n'
       + '见家族，见自己（ReSee）。\n'
@@ -17,10 +17,11 @@ export const AGENT_REGISTRY: Record<string, AgentDefinition> = {
       + '· 说「扫描建谱」→ 拍照/OCR 录入\n'
       + '· 不必先点按钮，直接跟我说',
     welcomeWorkspace: ({ familyName }) =>
-      `已打开「${familyName || '族谱'}」。我是身具智能的家族智能体，用对话操作本谱及后续家族能力：\n`
-      + '· 描述成员资料 → 自动填入（如「张三字子明第三世」）\n'
-      + '· 查关系、搜人、看原文、整理方案\n'
-      + '· 说「打开树图/成员/文字版」即可切页',
+      `已打开「${familyName || '族谱'}」。推荐：\n`
+      + '1. 点底部「整理」→ 图↔字 → 关系文字 → 实时预览 → 写入主谱\n'
+      + '2. 直接说「整理族谱」「重新识别扫描图」「重新生成关系描述」\n'
+      + '3. OCR/关系文字不对时不必手打，对话即可 AI 重生并自动写入版本\n'
+      + '4. 查人、改资料、切页，继续对话即可',
   },
 }
 

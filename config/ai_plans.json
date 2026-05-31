@@ -1,0 +1,71 @@
+{
+  "default_plan": "free",
+  "plans": {
+    "free": {
+      "label": "免费版",
+      "description": "每月平台赠送额度，无需配置 Key 即可体验",
+      "limits": {
+        "ocr": { "fast": 5, "slow": 20 },
+        "parse": { "fast": 15, "slow": 60 },
+        "agent": { "fast": 10, "slow": 40 }
+      }
+    },
+    "pro": {
+      "label": "Pro 包月",
+      "description": "更多快速额度，优先排队",
+      "price_monthly_cny": 10,
+      "coming_soon": true,
+      "limits": {
+        "ocr": { "fast": 200, "slow": 1000 },
+        "parse": { "fast": 500, "slow": 2000 },
+        "agent": { "fast": 300, "slow": 1500 }
+      }
+    }
+  },
+  "platform": {
+    "provider": "siliconflow",
+    "ocr_provider": "siliconflow",
+    "parse_provider": "siliconflow",
+    "ocr_model": "Qwen/Qwen2-VL-72B-Instruct",
+    "parse_model": "Qwen/Qwen2.5-72B-Instruct"
+  },
+  "routes": {
+    "ocr": {
+      "fast": [
+        { "source": "platform", "provider": "siliconflow", "model": "Qwen/Qwen2-VL-72B-Instruct", "label": "平台 · 快速 OCR" },
+        { "source": "byok", "provider": "minimax", "model": "MiniMax-M2.7", "label": "自带 Key · MiniMax" },
+        { "source": "byok", "provider": "siliconflow", "model": "Qwen/Qwen2-VL-72B-Instruct", "label": "自带 Key · 硅基流动" },
+        { "source": "byok", "provider": "qwen", "model": "qwen-vl-plus", "label": "自带 Key · 通义千问" },
+        { "source": "byok", "provider": "openai", "model": "gpt-4o", "label": "自带 Key · OpenAI" },
+        { "source": "byok", "provider": "zhipu", "model": "glm-4v-9b", "label": "自带 Key · 智谱" }
+      ],
+      "slow": [
+        { "source": "platform", "provider": "siliconflow", "model": "Qwen/Qwen2-VL-72B-Instruct", "label": "平台 · 慢速 OCR（排队）" },
+        { "source": "byok", "provider": "siliconflow", "model": "Qwen/Qwen2-VL-72B-Instruct", "label": "自带 Key · 硅基流动" },
+        { "source": "byok", "provider": "minimax", "model": "MiniMax-M2.7", "label": "自带 Key · MiniMax" }
+      ]
+    },
+    "parse": {
+      "fast": [
+        { "source": "platform", "provider": "siliconflow", "model": "Qwen/Qwen2.5-72B-Instruct", "label": "平台 · 快速解析" },
+        { "source": "byok", "provider": "minimax", "model": "MiniMax-M2.7", "label": "自带 Key · MiniMax" },
+        { "source": "byok", "provider": "siliconflow", "model": "Qwen/Qwen2.5-72B-Instruct", "label": "自带 Key · 硅基流动" },
+        { "source": "byok", "provider": "deepseek", "model": "deepseek-chat", "label": "自带 Key · DeepSeek" },
+        { "source": "byok", "provider": "qwen", "model": "qwen-plus", "label": "自带 Key · 通义千问" },
+        { "source": "byok", "provider": "openai", "model": "gpt-4o-mini", "label": "自带 Key · OpenAI" }
+      ],
+      "slow": [
+        { "source": "platform", "provider": "siliconflow", "model": "Qwen/Qwen2.5-72B-Instruct", "label": "平台 · 慢速解析（排队）" },
+        { "source": "byok", "provider": "deepseek", "model": "deepseek-chat", "label": "自带 Key · DeepSeek" },
+        { "source": "byok", "provider": "siliconflow", "model": "Qwen/Qwen2.5-72B-Instruct", "label": "自带 Key · 硅基流动" },
+        { "source": "byok", "provider": "minimax", "model": "MiniMax-M2.7", "label": "自带 Key · MiniMax" }
+      ]
+    }
+  },
+  "source_labels": {
+    "platform": "平台免费额度",
+    "byok": "自带 Key",
+    "manual": "手动指定",
+    "local": "本地规则"
+  }
+}

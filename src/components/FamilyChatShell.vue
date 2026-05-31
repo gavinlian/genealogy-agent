@@ -18,7 +18,15 @@ import {
 import type { AgentMessage, AgentUiAction } from '../agent/types'
 import AgentChatPane from './agent/AgentChatPane.vue'
 import GenealogyReferenceView, { type ReferenceViewMode } from './view/GenealogyReferenceView.vue'
+import GenealogyOrganizeWorkspace from './GenealogyOrganizeWorkspace.vue'
+import SourceFusionPanel from './SourceFusionPanel.vue'
+import FamilyMergePanel from './FamilyMergePanel.vue'
+import AgentDiscoveryPanel from './AgentDiscoveryPanel.vue'
+import SourceImageZoom from './SourceImageZoom.vue'
+import { uploadImageUrl } from '../utils/uploadImageUrl'
 import { useChatSidebar } from '../composables/useChatSidebar'
+import { useToast } from '../composables/useToast'
+import { useFamilyOrganize } from '../composables/useFamilyOrganize'
 
 type FamilySummary = {
   id: string
@@ -29,29 +37,189 @@ type FamilySummary = {
   source_text?: string
 }
 
+type TabId = 'tree' | 'source' | 'fusion' | 'organize' | 'discoveries'
+
 const props = defineProps<{
   family: FamilySummary | null
   families: FamilySummary[]
   familiesLoading?: boolean
+  sourceText?: string
+  sourceVersionId?: string
+  sourceVersionLabel?: string
+  requestedTab?: TabId | null
+  agentPendingCount?: number
+  agentReport?: string
 }>()
+
+const discoveryOpen = defineModel<boolean>('discoveryOpen', { default: false })
 
 const emit = defineEmits<{
   selectFamily: [id: string]
   leaveFamily: []
   switchClassic: [panel?: string]
-  refresh: []
+  refresh: [pendingCount?: number]
   createFamily: [payload?: { name?: string; surname?: string; description?: string }]
   scan: []
   settings: []
   deleteFamily: [family: FamilySummary]
+  openDiscoveries: []
+  openAgentSettings: []
+  applyDiscoveryPlan: [payload: { familyId: string; plan: unknown }]
 }>()
-
-type TabId = 'tree' | 'source'
 
 const TABS: { id: TabId; label: string; icon: string }[] = [
   { id: 'tree', label: '族谱', icon: '🌳' },
+  { id: 'discoveries', label: '发现', icon: '🔔' },
+  { id: 'organize', label: '整理', icon: '✨' },
   { id: 'source', label: '原文', icon: '📜' },
+  { id: 'fusion', label: '合并整理', icon: '🔗' },
 ]
+
+const WORKSPACE_QUICK_PROMPTS = ['整理族谱', '补全缺失关系', '整理配偶关系']
+
+const ORGANIZE_INTENT = /整理(?:族谱|全谱|主谱)?|理谱|补全(?:缺失)?关系|整理配偶|智能整理|从原文整理|生成关系预览/
+
+const MUTATING_TOOLS = new Set([
+  'propose_person_patch',
+  'propose_sync_person_details',
+  'propose_organize_plan',
+  'propose_save_fusion',
+  'propose_merge_family',
+])
+
+const organizeWorkspaceRef = ref<InstanceType<typeof GenealogyOrganizeWorkspace> | null>(null)
+const fusionSeedText = ref('')
+const sourceVersions = ref<any[]>([])
+const activeSourcePreview = ref('')
+const showDiscoveryDrawer = ref(false)
+const dashboard = ref<{ owned: FamilySummary[]; followed: FamilySummary[]; discoverable: FamilySummary[] }>({
+  owned: [],
+  followed: [],
+  discoverable: [],
+})
+const dashboardLoading = ref(false)
+
+const { show: showToast } = useToast()
+
+const familyIdRef = computed(() => props.family?.id || null)
+const memberCountRef = computed(() => persons.value.length)
+const organize = useFamilyOrganize(familyIdRef, memberCountRef, {
+  onNotify: (msg, type) => showToast(msg, type || 'info'),
+})
+const {
+  plan: organizePlan,
+  diff: organizeDiff,
+  applyMode: organizeApplyMode,
+  cleanSlate: organizeCleanSlate,
+  hasPendingPlan,
+} = organize
+
+const agentPendingCount = computed(() => props.agentPendingCount || 0)
+const agentReport = computed(() => props.agentReport || '')
+
+const displayOwnedFamilies = computed(() => {
+  if (dashboard.value.owned.length) return dashboard.value.owned
+  return props.families || []
+})
+
+function openDiscoveriesUi() {
+  if (hasFamily.value) {
+    switchTab('discoveries')
+  } else {
+    showDiscoveryDrawer.value = true
+  }
+}
+
+watch(discoveryOpen, (open) => {
+  if (!open) return
+  openDiscoveriesUi()
+  discoveryOpen.value = false
+})
+
+const organizeSourceText = computed(() => {
+  const fromVersions = activeSourcePreview.value.trim()
+  return fromVersions || (props.sourceText || sourceText.value || props.family?.source_text || '').trim()
+})
+
+const sourceV1Version = computed(() =>
+  sourceVersions.value.find((v) => v.version_kind === 'ocr_raw') || null,
+)
+
+const sourceImageUrl = computed(() => uploadImageUrl(sourceV1Version.value?.image_path))
+
+const sourceV1Text = computed(() => (sourceV1Version.value?.source_text || '').trim())
+
+async function loadSourcePreview() {
+  if (!props.family?.id) {
+    sourceVersions.value = []
+    activeSourcePreview.value = ''
+    return
+  }
+  try {
+    const res = await api('GET', `/families/${props.family.id}/source-versions`)
+    sourceVersions.value = res.versions || []
+    const activeId = res.active_version_id
+    const active = sourceVersions.value.find((v) => v.id === activeId)
+      || sourceVersions.value.find((v) => v.version_kind === 'custom')
+      || sourceVersions.value.find((v) => v.version_kind === 'relation_desc')
+      || sourceVersions.value.find((v) => v.version_kind === 'ocr_raw')
+    activeSourcePreview.value = (active?.source_text || '').trim()
+    if (activeSourcePreview.value) sourceText.value = activeSourcePreview.value
+  } catch {
+    /* ignore */
+  }
+}
+
+function stashPersonDraft(personId: string, draft: Record<string, unknown>) {
+  if (!props.family?.id || !Object.keys(draft).length) return
+  sessionStorage.setItem(
+    `genealogy_person_draft_${props.family.id}`,
+    JSON.stringify({ personId, draft }),
+  )
+}
+
+async function triggerOrganizeFromChat(message: string) {
+  activeTab.value = 'organize'
+  triggerAgentPulse('organize')
+  await organize.loadState()
+  await nextTick()
+  await organizeWorkspaceRef.value?.runFromAgent(message)
+}
+
+function applyToolCallSideEffects(toolCalls: any[]) {
+  for (const tc of toolCalls || []) {
+    if (tc.tool === 'fuse_source_versions' && tc.result?.stepped_text) {
+      fusionSeedText.value = tc.result.stepped_text
+      activeTab.value = 'fusion'
+      triggerAgentPulse('fusion')
+    }
+    if (tc.tool === 'propose_organize_plan') {
+      activeTab.value = 'organize'
+      triggerAgentPulse('organize')
+      void organize.loadState().then(async () => {
+        await nextTick()
+        organizeWorkspaceRef.value?.focusStep('preview')
+      })
+    }
+  }
+}
+
+function syncStateFromAgentResponse(res: {
+  state?: { active_tab?: string; anchor_person_id?: string | null; selected_person_id?: string | null }
+  tool_calls?: any[]
+}) {
+  if (res.state?.anchor_person_id !== undefined) {
+    anchorPersonId.value = res.state.anchor_person_id
+  }
+  if (res.state?.selected_person_id) {
+    selectedPersonId.value = res.state.selected_person_id
+  }
+  const tab = res.state?.active_tab
+  if (tab === 'organize' || tab === 'source' || tab === 'fusion' || tab === 'tree') {
+    activeTab.value = tab as TabId
+  }
+  applyToolCallSideEffects(res.tool_calls)
+}
 
 const agent = getAgent()
 
@@ -87,7 +255,7 @@ const activeTabMeta = computed(() => TABS.find((t) => t.id === activeTab.value) 
 const sourceExcerpt = computed(() => {
   const name = selectedPerson.value?.name
   if (!name) return ''
-  return extractSourceExcerpt(sourceText.value, name)
+  return extractSourceExcerpt(organizeSourceText.value || sourceText.value, name)
 })
 
 const homeSessionsStore = ref(loadHomeSessionsStore())
@@ -252,7 +420,11 @@ async function loadFamilyData() {
     sourceText.value = props.family.source_text || ''
     if (stateRes.success) {
       const tab = stateRes.active_tab as string
-      activeTab.value = tab === 'source' ? 'source' : 'tree'
+      activeTab.value =
+        tab === 'organize' ? 'organize' :
+        tab === 'source' ? 'source' :
+        tab === 'fusion' ? 'fusion' :
+        'tree'
       anchorPersonId.value = stateRes.anchor_person_id || null
       selectedPersonId.value = stateRes.selected_person_id || null
       sessionId.value = stateRes.session_id || null
@@ -261,6 +433,8 @@ async function loadFamilyData() {
     ensureWelcome()
     const entryCtx = popFamilyEntryContext(props.family.id)
     if (entryCtx) appendFamilyEntryBridge(entryCtx)
+    await organize.loadState(props.family.id)
+    await loadSourcePreview()
   } finally {
     loading.value = false
   }
@@ -269,6 +443,11 @@ async function loadFamilyData() {
 function switchTab(tab: TabId) {
   if (!hasFamily.value) return
   activeTab.value = tab
+  if (tab === 'organize') {
+    void organize.loadState()
+    if (organize.hasPendingPlan()) void organize.refreshDiff()
+  }
+  if (tab === 'source') void loadSourcePreview()
   persistUiState()
 }
 
@@ -289,13 +468,25 @@ async function persistUiState() {
 function applyUiActions(actions: AgentUiAction[]) {
   const hints = applyGenealogyUiActions(actions, {
     switchTab: (tab) => {
-      if (tab === 'organize' || tab === 'diff' || tab === 'person') {
-        emit('switchClassic', tab === 'person' ? undefined : tab)
+      if (tab === 'organize') {
+        activeTab.value = 'organize'
+        triggerAgentPulse('organize')
+        void organize.loadState()
         return
       }
-      if (tab === 'source' || tab === 'tree') {
-        activeTab.value = tab
-        triggerAgentPulse(tab)
+      if (tab === 'diff') {
+        emit('switchClassic', 'diff')
+        return
+      }
+      if (tab === 'person') {
+        selectedPersonId.value = selectedPersonId.value || anchorPersonId.value
+        activeTab.value = 'tree'
+        triggerAgentPulse('tree')
+        return
+      }
+      if (tab === 'source' || tab === 'tree' || tab === 'fusion') {
+        activeTab.value = tab as TabId
+        triggerAgentPulse(tab as TabId)
       }
     },
     focusPerson: (personId, name) => {
@@ -304,22 +495,57 @@ function applyUiActions(actions: AgentUiAction[]) {
       triggerAgentPulse('tree')
       if (name) agentLinkHint.value = `已选中【${name}】· 编辑请用经典模式`
     },
-    prefillPerson: (personId, _draft) => {
+    prefillPerson: (personId, draft, name) => {
       selectedPersonId.value = personId
-      activeTab.value = 'tree'
-      agentLinkHint.value = '对话已提取资料 · 请在经典模式中编辑成员'
-      emit('switchClassic')
+      stashPersonDraft(personId, draft || {})
+      agentLinkHint.value = name
+        ? `已提取【${name}】资料 · 正在打开成员编辑`
+        : '对话已提取资料 · 正在打开成员编辑'
+      emit('switchClassic', 'person')
     },
     setAnchor: (personId, name) => {
       anchorPersonId.value = personId
       void persistUiState()
       if (name) agentLinkHint.value = `我在谱中：${name}`
     },
-    openClassic: (panel) => emit('switchClassic', panel),
+    openClassic: (panel) => {
+      if (panel === 'organize') {
+        activeTab.value = 'organize'
+        triggerAgentPulse('organize')
+        void organize.loadState()
+        return
+      }
+      if (panel === 'source') {
+        activeTab.value = 'source'
+        void loadSourcePreview()
+        triggerAgentPulse('source')
+        return
+      }
+      emit('switchClassic', panel)
+    },
     openSettings: () => emit('settings'),
     openScan: () => emit('scan'),
+    organizeRegenerate: (target, synced) => handleOrganizeRegenerate(target, synced),
   })
   setAgentLinkHint(hints)
+}
+
+async function handleOrganizeRegenerate(target: string, synced?: boolean) {
+  activeTab.value = 'organize'
+  triggerAgentPulse('organize')
+  await organize.loadState()
+  await nextTick()
+  if (synced) {
+    await organizeWorkspaceRef.value?.reloadFromServer?.()
+    emit('refresh')
+    return
+  }
+  if (target === 'ocr_raw') {
+    await organizeWorkspaceRef.value?.regenerateOcr?.()
+  } else {
+    await organizeWorkspaceRef.value?.regenerateRelation?.()
+  }
+  emit('refresh')
 }
 
 function applyHomeActions(actions: any[]) {
@@ -344,6 +570,34 @@ function applyHomeActions(actions: any[]) {
       }
     }
   }
+}
+
+async function onOrganizeApplied(stats?: Record<string, number>) {
+  await organize.onApplied(stats)
+  await loadFamilyData()
+  emit('refresh')
+}
+
+async function onOrganizePlanEdited() {
+  await organize.refreshDiff()
+}
+
+watch(
+  () => props.requestedTab,
+  (tab) => {
+    if (tab === 'organize' && hasFamily.value) {
+      activeTab.value = 'organize'
+      void organize.loadState()
+      if (organize.hasPendingPlan()) void organize.refreshDiff()
+    }
+  },
+  { immediate: true },
+)
+
+async function onOrganizeCleared() {
+  await organize.onCleared()
+  await loadFamilyData()
+  emit('refresh')
 }
 
 async function respondConfirmation(token: string, approved: boolean) {
@@ -414,14 +668,39 @@ async function sendChat(text: string) {
       return
     }
     applyUiActions(res.ui_actions || [])
-    if (res.state) {
-      messages.value = res.state.messages || messages.value
-    } else {
-      messages.value.push({ role: 'assistant', content: res.reply || '' })
+    syncStateFromAgentResponse(res)
+    if (res.state?.messages) {
+      messages.value = res.state.messages
+    } else if (res.reply) {
+      messages.value.push({ role: 'assistant', content: res.reply })
     }
+
+    const hasRegenTool = (res.tool_calls || []).some(
+      (tc: { tool?: string }) => tc.tool === 'regenerate_source_version',
+    )
+    if (hasRegenTool) {
+      await loadSourcePreview()
+      emit('refresh')
+    }
+
+    const hasOrganizeTool = (res.tool_calls || []).some(
+      (tc: { tool?: string }) => tc.tool === 'propose_organize_plan',
+    )
+    const wantsOrganize =
+      ORGANIZE_INTENT.test(msg)
+      || (res.ui_actions || []).some((a: AgentUiAction) => a.type === 'switch_tab' && a.tab === 'organize')
+    if (wantsOrganize && !hasOrganizeTool) {
+      await triggerOrganizeFromChat(msg)
+    }
+
     await persistUiState()
-    await loadFamilyData()
-    emit('refresh')
+    const mutated =
+      Boolean(res.confirmation)
+      || (res.tool_calls || []).some((tc: { tool?: string }) => tc.tool && MUTATING_TOOLS.has(tc.tool))
+    if (mutated) {
+      await loadFamilyData()
+      emit('refresh')
+    }
   } finally {
     chatLoading.value = false
   }
@@ -437,7 +716,60 @@ function onFamilyPickerChange(e: Event) {
   else emit('leaveFamily')
 }
 
-watch(() => props.family?.id, () => loadFamilyData(), { immediate: true })
+async function loadDashboard() {
+  dashboardLoading.value = true
+  try {
+    const res = await api('GET', '/families/dashboard')
+    if (res.success) {
+      dashboard.value = {
+        owned: res.owned || [],
+        followed: res.followed || [],
+        discoverable: res.discoverable || [],
+      }
+    }
+  } finally {
+    dashboardLoading.value = false
+  }
+}
+
+async function followFamilyId(id: string) {
+  const res = await api('POST', `/families/${id}/follow`)
+  if (res.success) {
+    showToast('已关注族谱', 'success')
+    await loadDashboard()
+    emit('refresh')
+  } else {
+    showToast(res.message || res.detail || '关注失败', 'error')
+  }
+}
+
+async function unfollowFamilyId(id: string) {
+  const res = await api('DELETE', `/families/${id}/follow`)
+  if (res.success) {
+    showToast('已取消关注', 'success')
+    await loadDashboard()
+    emit('refresh')
+  } else {
+    showToast(res.message || res.detail || '操作失败', 'error')
+  }
+}
+
+function onDiscoveryApply(payload: { familyId: string; plan: unknown }) {
+  emit('applyDiscoveryPlan', payload)
+  switchTab('organize')
+}
+
+async function applyDiscoveryPlanLocal(payload: { familyId: string; plan: unknown }) {
+  const plan = payload.plan as import('../types/organize').OrganizePlan
+  organize.onLoadPlan({ plan, diff: null })
+  await organize.refreshDiff()
+  switchTab('organize')
+}
+
+watch(() => props.family?.id, (id) => {
+  loadFamilyData()
+  if (!id) void loadDashboard()
+}, { immediate: true })
 </script>
 
 <template>
@@ -489,6 +821,24 @@ watch(() => props.family?.id, () => loadFamilyData(), { immediate: true })
           经典编辑
         </button>
         <button
+          type="button"
+          class="btn-secondary btn-sm"
+          title="智能体发现"
+          @click="openDiscoveriesUi()"
+        >
+          🔔<span v-if="agentPendingCount" class="toolbar-badge">{{ agentPendingCount > 9 ? '9+' : agentPendingCount }}</span>
+        </button>
+        <button type="button" class="btn-ghost btn-sm" title="智能体设置" @click="emit('openAgentSettings')">智能体</button>
+        <button
+          v-if="hasFamily"
+          type="button"
+          class="btn-ghost btn-sm btn-danger-text"
+          title="删除当前族谱"
+          @click="emit('deleteFamily', family!)"
+        >
+          删除
+        </button>
+        <button
           v-if="isCompact"
           type="button"
           class="btn-secondary btn-sm agent-topbar-chat-btn"
@@ -500,38 +850,99 @@ watch(() => props.family?.id, () => loadFamilyData(), { immediate: true })
       </div>
     </header>
 
+    <div v-if="agentReport && !hasFamily" class="agent-report-banner">
+      <span>{{ agentReport }}</span>
+      <button type="button" class="btn-xs btn-primary" @click="openDiscoveriesUi">查看发现</button>
+    </div>
+
     <div class="agent-shell-body">
       <div class="agent-shell-main">
         <div class="agent-page-area">
           <div v-if="!hasFamily" class="agent-page agent-page--home">
             <div class="agent-home-toolbar">
               <h2 class="page-title">我的族谱</h2>
-              <button type="button" class="btn-primary btn-sm" @click="emit('createFamily')">+ 新建</button>
+              <div class="agent-home-toolbar-actions">
+                <button type="button" class="btn-secondary btn-sm" @click="openDiscoveriesUi">
+                  发现<span v-if="agentPendingCount" class="toolbar-badge">{{ agentPendingCount }}</span>
+                </button>
+                <button type="button" class="btn-primary btn-sm" @click="emit('createFamily')">+ 新建</button>
+              </div>
             </div>
-            <div v-if="familiesLoading" class="loading">加载中…</div>
-            <div v-else-if="!families.length" class="empty-state compact">
-              <p>还没有族谱。在对话里说「扫描建谱」，或点新建。</p>
-            </div>
-            <div v-else class="family-grid family-grid--compact">
-              <article
-                v-for="f in families"
-                :key="f.id"
-                class="family-card family-card--selectable"
-                @click="emit('selectFamily', f.id)"
-              >
-                <div class="family-avatar">{{ familyInitial(f) }}</div>
-                <div class="family-info">
-                  <h3>{{ f.name }}</h3>
-                  <span class="count">{{ f.person_count || 0 }} 位成员</span>
+            <div v-if="familiesLoading || dashboardLoading" class="loading">加载中…</div>
+            <template v-else>
+              <section v-if="displayOwnedFamilies.length" class="agent-home-section">
+                <h3 class="agent-home-section-title">本人族谱</h3>
+                <div class="family-grid family-grid--compact">
+                  <article
+                    v-for="f in displayOwnedFamilies"
+                    :key="f.id"
+                    class="family-card family-card--selectable"
+                    @click="emit('selectFamily', f.id)"
+                  >
+                    <div class="family-avatar">{{ familyInitial(f) }}</div>
+                    <div class="family-info">
+                      <h3>{{ f.name }}</h3>
+                      <span class="count">{{ f.person_count || 0 }} 位成员</span>
+                    </div>
+                    <button
+                      type="button"
+                      class="family-card-delete btn-xs btn-danger-text"
+                      title="删除族谱"
+                      @click.stop="emit('deleteFamily', f)"
+                    >
+                      删除
+                    </button>
+                  </article>
                 </div>
-              </article>
-            </div>
+              </section>
+              <section v-if="dashboard.followed.length" class="agent-home-section">
+                <h3 class="agent-home-section-title">关注族谱</h3>
+                <div class="family-grid family-grid--compact">
+                  <article
+                    v-for="f in dashboard.followed"
+                    :key="'f-' + f.id"
+                    class="family-card family-card--selectable family-card--followed"
+                    @click="emit('selectFamily', f.id)"
+                  >
+                    <div class="family-avatar">{{ familyInitial(f) }}</div>
+                    <div class="family-info">
+                      <h3>{{ f.name }}</h3>
+                      <span class="count">{{ f.person_count || 0 }} 位成员 · 只读关注</span>
+                    </div>
+                    <button type="button" class="btn-xs" @click.stop="unfollowFamilyId(f.id)">取消关注</button>
+                  </article>
+                </div>
+              </section>
+              <section v-if="dashboard.discoverable.length" class="agent-home-section">
+                <h3 class="agent-home-section-title">可关注族谱</h3>
+                <div class="family-grid family-grid--compact">
+                  <article
+                    v-for="f in dashboard.discoverable"
+                    :key="'d-' + f.id"
+                    class="family-card family-card--selectable"
+                  >
+                    <div class="family-avatar">{{ familyInitial(f) }}</div>
+                    <div class="family-info">
+                      <h3>{{ f.name }}</h3>
+                      <span class="count">{{ f.person_count || 0 }} 位成员</span>
+                    </div>
+                    <button type="button" class="btn-xs btn-primary" @click.stop="followFamilyId(f.id)">关注</button>
+                  </article>
+                </div>
+              </section>
+              <div v-if="!displayOwnedFamilies.length && !dashboard.followed.length" class="empty-state compact">
+                <p>还没有族谱。在对话里说「扫描建谱」，或点新建。</p>
+              </div>
+            </template>
           </div>
 
           <template v-else>
             <div v-if="loading" class="agent-chat-loading">加载族谱…</div>
             <template v-else>
-              <header class="agent-workspace-header agent-workspace-header--tree">
+              <header
+                v-if="activeTab === 'tree'"
+                class="agent-workspace-header agent-workspace-header--tree"
+              >
                 <div class="agent-workspace-header-main">
                   <span class="agent-workspace-tab-icon">{{ activeTabMeta.icon }}</span>
                   <h3 class="agent-workspace-title">{{ activeTabMeta.label }}</h3>
@@ -554,6 +965,14 @@ watch(() => props.family?.id, () => loadFamilyData(), { immediate: true })
                   >
                     卡片
                   </button>
+                  <button
+                    type="button"
+                    class="ocr-view-mode-btn"
+                    :class="{ active: genealogyViewMode === 'graph' }"
+                    @click="genealogyViewMode = 'graph'"
+                  >
+                    关系图
+                  </button>
                 </div>
                 <p v-if="agentLinkHint" class="agent-workspace-hint">{{ agentLinkHint }}</p>
               </header>
@@ -575,21 +994,112 @@ watch(() => props.family?.id, () => loadFamilyData(), { immediate: true })
                   <button type="button" class="btn-secondary btn-sm" @click="emit('switchClassic')">经典编辑</button>
                 </div>
                 <div v-if="selectedPerson" class="agent-selection-bar">
-                  <span>已选 <strong>{{ selectedPerson.name }}</strong></span>
+                  <span>已选 <strong>{{ selectedPerson.name }}</strong> · 相关关系已高亮</span>
                   <button type="button" class="btn-secondary btn-sm" @click="emit('switchClassic')">编辑成员</button>
                 </div>
               </div>
 
               <div v-show="activeTab === 'source'" class="agent-page agent-page--source">
-                <p class="hint">原文预览（完整三版编辑请用「经典编辑」→ 原文抽屉）</p>
+                <div class="agent-source-toolbar">
+                  <span class="hint">
+                    {{ sourceImageUrl ? '扫描原图 ↔ 版本一 OCR 原文' : '当前活跃原文版本（上传扫描图请用「整理」→ ① 扫描 OCR）' }}
+                  </span>
+                  <button type="button" class="btn-xs btn-secondary" @click="emit('switchClassic', 'source')">
+                    经典编辑 · 对照校对
+                  </button>
+                </div>
                 <div v-if="sourceExcerpt" class="agent-source-excerpt">
                   <strong v-if="selectedPerson">节选 · {{ selectedPerson.name }}</strong>
                   <p>{{ sourceExcerpt }}</p>
                 </div>
-                <textarea v-model="sourceText" class="input agent-source-text" readonly rows="12" />
+                <div v-if="sourceImageUrl" class="agent-source-pair">
+                  <div class="agent-source-pair-image">
+                    <SourceImageZoom :src="sourceImageUrl" alt="族谱扫描原图" />
+                  </div>
+                  <div class="agent-source-pair-text">
+                    <p class="hint agent-source-pair-label">版本一 · OCR 原文</p>
+                    <textarea
+                      :value="sourceV1Text || organizeSourceText"
+                      class="input agent-source-text agent-source-text--pair"
+                      readonly
+                      rows="12"
+                    />
+                  </div>
+                </div>
+                <textarea
+                  v-else
+                  :value="organizeSourceText"
+                  class="input agent-source-text"
+                  readonly
+                  rows="14"
+                />
+              </div>
+
+              <div v-show="activeTab === 'organize'" class="agent-page agent-page--organize">
+                <GenealogyOrganizeWorkspace
+                  ref="organizeWorkspaceRef"
+                  v-if="family?.id"
+                  :family-id="family.id"
+                  :family-name="family.name"
+                  :member-count="persons.length"
+                  :selected-person-id="selectedPersonId || undefined"
+                  :selected-person-name="selectedPerson?.name || ''"
+                  :plan="organizePlan"
+                  :diff="organizeDiff"
+                  :apply-mode="organizeApplyMode"
+                  :clean-slate="organizeCleanSlate"
+                  @update:apply-mode="organizeApplyMode = $event"
+                  @update:clean-slate="organizeCleanSlate = $event"
+                  @update:plan="organize.onPlanPatch($event)"
+                  @load-plan="organize.onLoadPlan($event)"
+                  @plan-edited="onOrganizePlanEdited"
+                  @applied="onOrganizeApplied"
+                  @cleared="onOrganizeCleared"
+                  @dismiss="organize.dismissPlan()"
+                  @notify="(msg, type) => showToast(msg, type || 'info')"
+                  @refresh="loadFamilyData(); emit('refresh')"
+                  @select-person="selectPerson"
+                />
+              </div>
+
+              <div v-show="activeTab === 'discoveries'" class="agent-page agent-page--discoveries">
+                <AgentDiscoveryPanel
+                  embedded
+                  :family-id="family?.id"
+                  @toast="(msg, kind) => showToast(msg, kind || 'info')"
+                  @apply-plan="applyDiscoveryPlanLocal"
+                  @refresh="(n) => emit('refresh', n)"
+                />
+              </div>
+
+              <div v-show="activeTab === 'fusion'" class="agent-page agent-page--fusion">
+                <FamilyMergePanel
+                  v-if="family?.id"
+                  :family-id="family.id"
+                  :family-name="family.name"
+                  :initial-fusion-text="fusionSeedText"
+                  @toast="(msg, kind) => showToast(msg, kind || 'info')"
+                  @saved="loadFamilyData(); emit('refresh')"
+                  @open-organize="switchTab('organize')"
+                />
               </div>
             </template>
           </template>
+
+          <div v-if="showDiscoveryDrawer && !hasFamily" class="modal" @click.self="showDiscoveryDrawer = false">
+            <div class="modal-content modal-lg agent-discovery-modal" @click.stop>
+              <div class="ai-settings-header">
+                <h3>智能体发现</h3>
+                <button type="button" class="btn-close" @click="showDiscoveryDrawer = false">×</button>
+              </div>
+              <AgentDiscoveryPanel
+                embedded
+                :show-header="false"
+                @toast="(msg, kind) => showToast(msg, kind || 'info')"
+                @refresh="(n?: number) => emit('refresh', n)"
+              />
+            </div>
+          </div>
         </div>
 
         <nav v-if="hasFamily" class="agent-tab-bar agent-tab-bar--minimal">
@@ -603,6 +1113,14 @@ watch(() => props.family?.id, () => loadFamilyData(), { immediate: true })
           >
             <span class="agent-tab-icon">{{ t.icon }}</span>
             <span class="agent-tab-label">{{ t.label }}</span>
+            <span
+              v-if="t.id === 'organize' && hasPendingPlan()"
+              class="agent-tab-badge"
+            >1</span>
+            <span
+              v-if="t.id === 'discoveries' && agentPendingCount"
+              class="agent-tab-badge"
+            >{{ agentPendingCount > 9 ? '9+' : agentPendingCount }}</span>
           </button>
         </nav>
       </div>
@@ -630,6 +1148,7 @@ watch(() => props.family?.id, () => loadFamilyData(), { immediate: true })
           :show-collapse="false"
           :show-mobile-handle="isCompact"
           :show-scan="true"
+          :quick-prompts="hasFamily ? WORKSPACE_QUICK_PROMPTS : undefined"
           @send="sendChat"
           @toggle-expanded="toggleChatExpanded"
           @new-session="newChatSession"

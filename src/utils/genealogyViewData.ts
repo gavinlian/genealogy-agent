@@ -77,14 +77,111 @@ export function mapApiPersons(raw: any[]): ViewPerson[] {
     .filter((p) => p.name)
 }
 
-export function mapApiRelations(raw: any[]): ViewRelation[] {
-  return (raw || [])
-    .map((r) => ({
-      from: (r.from || r.from_name || '').trim(),
-      to: (r.to || r.to_name || '').trim(),
-      type: (r.type || r.relation_type || 'parent_child') as ViewRelation['type'],
-    }))
-    .filter((r) => r.from && r.to)
+export function parseTextToViewRelations(text: string): ViewRelation[] {
+  const rels: ViewRelation[] = []
+  const seen = new Set<string>()
+  for (const line of (text || '').split(/\r?\n/)) {
+    const s = line.trim()
+    if (!s) continue
+    const spouse = s.match(/([\u4e00-\u9fff]{1,4})\s*配\s*([\u4e00-\u9fff]{1,4})/)
+    if (spouse) {
+      const key = `spouse:${spouse[1]}:${spouse[2]}`
+      if (!seen.has(key)) {
+        seen.add(key)
+        rels.push({ from: spouse[1], to: spouse[2], type: 'spouse' })
+      }
+      continue
+    }
+    const pc = s.match(/([\u4e00-\u9fff]{1,4})\s*(?:→|->|—|-)\s*([\u4e00-\u9fff]{1,4})/)
+    if (pc) {
+      const key = `pc:${pc[1]}:${pc[2]}`
+      if (!seen.has(key)) {
+        seen.add(key)
+        rels.push({ from: pc[1], to: pc[2], type: 'parent_child' })
+      }
+    }
+  }
+  return rels
+}
+
+export function mapApiRelations(raw: any[], personSource?: any[]): ViewRelation[] {
+  const idToName = new Map<string, string>()
+  for (const p of personSource || []) {
+    const id = p?.id != null ? String(p.id) : ''
+    const name = (p?.name || '').trim()
+    if (id && name) idToName.set(id, name)
+  }
+
+  const rels: ViewRelation[] = []
+  const seen = new Set<string>()
+
+  for (const r of raw || []) {
+    let from = (r.from || r.from_name || '').trim()
+    let to = (r.to || r.to_name || '').trim()
+    const fid = r.from_person_id != null ? String(r.from_person_id) : ''
+    const tid = r.to_person_id != null ? String(r.to_person_id) : ''
+    if (!from && fid) from = idToName.get(fid) || ''
+    if (!to && tid) to = idToName.get(tid) || ''
+    if (!from || !to) continue
+    const type = (r.type || r.relation_type || 'parent_child') as ViewRelation['type']
+    const key = `${type}:${from}:${to}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    rels.push({ from, to, type })
+  }
+  return rels
+}
+
+/** 从 parent_id / spouse_ids 补全缺失的关系边 */
+export function enrichRelationsFromPersons(rawPersons: any[], relations: ViewRelation[]): ViewRelation[] {
+  const rels = [...relations]
+  const seen = new Set(rels.map((r) => `${r.type}:${r.from}:${r.to}`))
+  const byId = new Map<string, any>()
+  for (const p of rawPersons || []) {
+    if (p?.id) byId.set(String(p.id), p)
+  }
+
+  for (const p of rawPersons || []) {
+    const name = (p.name || '').trim()
+    if (!name) continue
+    const parentId = p.parent_id != null ? String(p.parent_id) : ''
+    if (parentId) {
+      const parent = byId.get(parentId)
+      const parentName = (parent?.name || '').trim()
+      if (parentName) {
+        const key = `parent_child:${parentName}:${name}`
+        if (!seen.has(key)) {
+          seen.add(key)
+          rels.push({ from: parentName, to: name, type: 'parent_child' })
+        }
+      }
+    }
+    let spouseIds: string[] = []
+    try {
+      const raw = p.spouse_ids
+      if (typeof raw === 'string' && raw.trim()) spouseIds = JSON.parse(raw)
+      else if (Array.isArray(raw)) spouseIds = raw
+    } catch {
+      spouseIds = []
+    }
+    for (const sid of spouseIds) {
+      const sp = byId.get(String(sid))
+      const spName = (sp?.name || '').trim()
+      if (!spName) continue
+      const a = name < spName ? name : spName
+      const b = name < spName ? spName : name
+      const key = `spouse:${a}:${b}`
+      if (!seen.has(key)) {
+        seen.add(key)
+        rels.push({ from: a, to: b, type: 'spouse' })
+      }
+    }
+  }
+  return rels
+}
+
+export function mapApiRelationsLegacy(raw: any[]): ViewRelation[] {
+  return mapApiRelations(raw, [])
 }
 
 export function resolveViewData(opts: {
@@ -93,12 +190,20 @@ export function resolveViewData(opts: {
   structuredText?: string
   rawText?: string
 }): { persons: ViewPerson[]; relations: ViewRelation[] } {
-  const relations = mapApiRelations(opts.relations || [])
-  if (opts.persons?.length) {
-    return { persons: mapApiPersons(opts.persons), relations }
-  }
+  const rawPersons = opts.persons || []
   const text = (opts.structuredText || opts.rawText || '').trim()
-  return { persons: parseTextToViewPersons(text), relations }
+
+  let persons: ViewPerson[] = rawPersons.length ? mapApiPersons(rawPersons) : parseTextToViewPersons(text)
+  let relations = mapApiRelations(opts.relations || [], rawPersons.length ? rawPersons : persons)
+  relations = enrichRelationsFromPersons(rawPersons, relations)
+
+  if (!relations.length && text) {
+    relations = parseTextToViewRelations(text)
+  }
+  if (!persons.length && text) {
+    persons = parseTextToViewPersons(text)
+  }
+  return { persons, relations }
 }
 
 export function groupByGeneration(persons: ViewPerson[]) {
@@ -131,14 +236,8 @@ export function buildSpouseMap(relations: ViewRelation[]) {
   return m
 }
 
-export function mapFamilyRelations(raw: any[]): ViewRelation[] {
-  return (raw || [])
-    .map((r) => ({
-      from: (r.from_name || r.from || '').trim(),
-      to: (r.to_name || r.to || '').trim(),
-      type: (r.relation_type === 'spouse' ? 'spouse' : 'parent_child') as ViewRelation['type'],
-    }))
-    .filter((r) => r.from && r.to)
+export function mapFamilyRelations(raw: any[], personSource?: any[]): ViewRelation[] {
+  return mapApiRelations(raw, personSource)
 }
 
 export function findRoots(persons: ViewPerson[], childrenMap: Map<string, string[]>) {

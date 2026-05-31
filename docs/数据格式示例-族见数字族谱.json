@@ -1,0 +1,429 @@
+{
+  "_说明": "族见当前数字族谱数据格式参考。含：简单导出、完整归档、PDF/OCR 中间结果、解析入库前格式，以及你期望的「每页独立资产」目标格式（尚未实现）。",
+  "_如何导出真实数据": {
+    "简单导出_仅主谱": "GET /api/families/{family_id}/export",
+    "完整归档_含原文版本": "GET /api/families/{family_id}/archive",
+    "用户全部族谱": "GET /api/archive/export",
+    "GEDCOM": "GET /api/families/{family_id}/gedcom/export"
+  },
+
+  "格式一_简单导出": {
+    "_用途": "经典模式「导出 JSON」按钮，只含族谱元信息 + 成员 + 关系，不含 OCR 原文版本",
+    "exported_at": "2026-05-22T10:00:00",
+    "family": {
+      "id": "a1b2c3d4",
+      "name": "张氏族谱",
+      "surname": "张",
+      "description": "示例族谱",
+      "root_person_id": "p001",
+      "start_generation": 1,
+      "source_text": "（legacy 字段，新版本请用 source_versions）",
+      "source_annotations": "[]",
+      "created_at": "2026-05-01T08:00:00",
+      "updated_at": "2026-05-22T09:00:00",
+      "owner_user_id": "user-demo"
+    },
+    "persons": [
+      {
+        "id": "p001",
+        "family_id": "a1b2c3d4",
+        "name": "张始祖",
+        "gender": "male",
+        "birth_year": 1800,
+        "death_year": 1880,
+        "generation": 1,
+        "generation_name": "德",
+        "generation_prefix": "德字辈",
+        "parent_id": null,
+        "spouse_ids": "[\"p002\"]",
+        "status": "confirmed",
+        "review_status": "confirmed",
+        "is_placeholder": 0,
+        "courtesy_name": "子明",
+        "art_name": "静斋",
+        "county": "某县",
+        "town": "某镇",
+        "village": "某村",
+        "biography": "迁居于…",
+        "ai_confidence": 0.92,
+        "created_at": "2026-05-01T08:00:00"
+      },
+      {
+        "id": "p003",
+        "family_id": "a1b2c3d4",
+        "name": "张长子",
+        "gender": "male",
+        "birth_year": 1825,
+        "death_year": null,
+        "generation": 2,
+        "generation_name": "仁",
+        "parent_id": "p001",
+        "spouse_ids": "[]",
+        "status": "confirmed",
+        "review_status": "pending_review",
+        "is_placeholder": 0,
+        "created_at": "2026-05-01T08:00:00"
+      }
+    ],
+    "relations": [
+      {
+        "id": "r001",
+        "family_id": "a1b2c3d4",
+        "from_person_id": "p001",
+        "to_person_id": "p003",
+        "relation_type": "parent_child",
+        "relation_subtype": "birth",
+        "status": "confirmed",
+        "confidence": 1.0,
+        "note": null,
+        "created_at": "2026-05-01T08:00:00"
+      },
+      {
+        "id": "r002",
+        "family_id": "a1b2c3d4",
+        "from_person_id": "p001",
+        "to_person_id": "p002",
+        "relation_type": "spouse",
+        "relation_subtype": "birth",
+        "status": "confirmed",
+        "confidence": 0.95,
+        "note": null,
+        "created_at": "2026-05-01T08:00:00"
+      }
+    ]
+  },
+
+  "格式二_完整归档_genealogy-archive-1.0": {
+    "_用途": "推荐用于备份/迁移；包含主谱 + 原文三版进化链 + OCR 记录",
+    "schema": "genealogy-archive/1.0",
+    "exported_at": "2026-05-22T10:00:00",
+    "family": {
+      "id": "a1b2c3d4",
+      "name": "张氏族谱",
+      "surname": "张",
+      "description": "从 3 页 PDF 扫描录入",
+      "root_person_id": "p001",
+      "start_generation": 1
+    },
+    "persons": [
+      {
+        "native": {
+          "id": "p001",
+          "family_id": "a1b2c3d4",
+          "name": "张始祖",
+          "gender": "male",
+          "generation": 1,
+          "generation_name": "德",
+          "courtesy_name": "子明",
+          "review_status": "confirmed"
+        },
+        "international": {
+          "id": "p001",
+          "family_id": "a1b2c3d4",
+          "name": "张始祖",
+          "sex": "male",
+          "generation": 1,
+          "generation_name": "德",
+          "courtesy_name": "子明",
+          "status": "confirmed",
+          "review_status": "confirmed",
+          "is_placeholder": false
+        }
+      }
+    ],
+    "relations": [
+      {
+        "native": {
+          "id": "r001",
+          "family_id": "a1b2c3d4",
+          "from_person_id": "p001",
+          "to_person_id": "p003",
+          "relation_type": "parent_child",
+          "relation_subtype": "birth",
+          "status": "confirmed",
+          "confidence": 1.0
+        },
+        "international": {
+          "id": "r001",
+          "family_id": "a1b2c3d4",
+          "from_person_id": "p001",
+          "to_person_id": "p003",
+          "relation_type": "parent_child",
+          "relation_subtype": "birth",
+          "status": "confirmed",
+          "confidence": 1.0
+        }
+      }
+    ],
+    "source_versions": [
+      {
+        "id": "sv001",
+        "family_id": "a1b2c3d4",
+        "version_no": 1,
+        "version_kind": "ocr_raw",
+        "label": "版本一 · OCR 原文",
+        "source_text": "===== 第 1 页 =====\n张始祖 字子明 德字辈\n张长子 仁字辈\n\n===== 第 2 页 =====\n张次子 …",
+        "source_annotations": [
+          {
+            "id": "0-4-张始祖",
+            "name": "张始祖",
+            "start": 14,
+            "end": 17,
+            "source": "ai"
+          }
+        ],
+        "status": "confirmed",
+        "note": "image:abc123.jpg|layout:vertical_rl",
+        "layout_hint": "vertical_rl",
+        "image_path": "abc123.jpg",
+        "parent_version_id": null,
+        "created_at": "2026-05-20T12:00:00",
+        "updated_at": "2026-05-22T09:00:00"
+      },
+      {
+        "id": "sv002",
+        "family_id": "a1b2c3d4",
+        "version_no": 2,
+        "version_kind": "relation_desc",
+        "label": "版本二 · 关系描述",
+        "source_text": "第1代：张始祖（字子明，德字辈）\n  └─ 第2代：张长子（仁字辈）\n  └─ 第2代：张次子（义字辈）",
+        "source_annotations": [],
+        "status": "draft",
+        "parent_version_id": "sv001",
+        "created_at": "2026-05-20T12:05:00"
+      },
+      {
+        "id": "sv003",
+        "family_id": "a1b2c3d4",
+        "version_no": 3,
+        "version_kind": "custom",
+        "label": "版本三 · 自定义",
+        "source_text": "（人工修正后的关系描述，定稿后用于生成主谱）",
+        "status": "confirmed",
+        "parent_version_id": "sv002"
+      },
+      {
+        "id": "sv004",
+        "family_id": "a1b2c3d4",
+        "version_no": 4,
+        "version_kind": "fusion",
+        "label": "融合稿 · 多版合并",
+        "source_text": "（OCR + 关系描述 + 主谱关系融合后的逐步叙述稿）",
+        "status": "draft"
+      }
+    ],
+    "active_source_version_id": "sv002",
+    "ocr_records": {
+      "_说明": "表已存在但主流程暂未写入；规划用于「每页一条 OCR 记录」",
+      "_当前状态": "空数组或未使用",
+      "示例结构": [
+        {
+          "id": "ocr001",
+          "family_id": "a1b2c3d4",
+          "image_path": "page-1.jpg",
+          "raw_text": "第1页 OCR 原文",
+          "parsed_text": null,
+          "status": "pending",
+          "created_at": "2026-05-20T12:00:00"
+        }
+      ]
+    },
+    "stats": {
+      "person_count": 12,
+      "relation_count": 11,
+      "source_version_count": 4
+    },
+    "field_map": {
+      "name": "name",
+      "gender": "sex",
+      "birth_year": "birth_date_approx",
+      "death_year": "death_date_approx",
+      "generation": "generation",
+      "generation_name": "generation_name",
+      "courtesy_name": "courtesy_name",
+      "art_name": "art_name",
+      "county": "place_county",
+      "town": "place_town",
+      "village": "place_village",
+      "biography": "biography"
+    }
+  },
+
+  "格式三_PDF扫描OCR_API响应": {
+    "_接口": "POST /api/agent/pdf/scan-ocr",
+    "_说明": "多页 PDF 逐页识别后的 API 返回；pages 有每页文字，但入库时目前合并成一段 source_text",
+    "success": true,
+    "step": "pdf_ocr",
+    "text": "===== 第 1 页 =====\n张始祖 字子明\n\n===== 第 2 页 =====\n张长子 仁字辈",
+    "page_count": 3,
+    "pages_recognized": 3,
+    "pages": [
+      {
+        "page": 1,
+        "text": "张始祖 字子明 德字辈",
+        "success": true,
+        "width": 1240,
+        "height": 1754
+      },
+      {
+        "page": 2,
+        "text": "张长子 仁字辈\n张次子 义字辈",
+        "success": true,
+        "width": 1240,
+        "height": 1754
+      },
+      {
+        "page": 3,
+        "text": "张孙 礼字辈",
+        "success": true,
+        "width": 1240,
+        "height": 1754
+      }
+    ],
+    "page_errors": [],
+    "preview_image_base64": "（仅第1页 JPEG base64，省略）",
+    "pdf_path": "uploads/xyz789.pdf",
+    "ocr": {
+      "provider": "minimax",
+      "model": "MiniMax-Text-01"
+    }
+  },
+
+  "格式四_单张图片OCR_API响应": {
+    "_接口": "POST /api/agent/scan-ocr",
+    "success": true,
+    "text": "张始祖 字子明\n张长子 仁字辈",
+    "image_path": "uploads/abc123.jpg",
+    "ocr": {
+      "provider": "minimax",
+      "model": "MiniMax-Text-01"
+    }
+  },
+
+  "格式五_解析结果_入库前": {
+    "_说明": "OCR/关系描述 → parseTextContent 后的结构；确认后 POST /api/persons/batch 写入主谱",
+    "persons": [
+      {
+        "name": "张始祖",
+        "gender": "male",
+        "generation": 1,
+        "generation_name": "德",
+        "courtesy_name": "子明",
+        "review_status": "pending_review",
+        "_order": 0
+      },
+      {
+        "name": "张长子",
+        "gender": "male",
+        "generation": 2,
+        "generation_name": "仁",
+        "review_status": "pending_review",
+        "_order": 1
+      }
+    ],
+    "relations": [
+      {
+        "from": "张始祖",
+        "to": "张长子",
+        "type": "parent_child",
+        "status": "inferred",
+        "confidence": 0.8
+      }
+    ],
+    "relationDescription": "第1代：张始祖…",
+    "warning": null
+  },
+
+  "格式六_关系类型枚举": {
+    "relation_type": [
+      "parent_child",
+      "spouse",
+      "sibling",
+      "adopted",
+      "step"
+    ],
+    "relation_subtype": [
+      "birth",
+      "adopted",
+      "step"
+    ],
+    "review_status": [
+      "confirmed",
+      "pending_review",
+      "rejected"
+    ],
+    "version_kind": [
+      "ocr_raw",
+      "relation_desc",
+      "custom",
+      "fusion"
+    ],
+    "layout_hint": [
+      "horizontal_ltr",
+      "horizontal_rtl",
+      "vertical_rl",
+      "prose"
+    ]
+  },
+
+  "格式七_你期望的目标格式_尚未实现": {
+    "_说明": "每个 PDF 页 / 每张图片 → 独立数字资产 → 汇总成完整数字族谱。这是下一步要补的数据模型，供你对照设计。",
+    "schema": "genealogy-digitize/1.0-draft",
+    "family_id": "a1b2c3d4",
+    "source_document": {
+      "type": "pdf",
+      "original_filename": "张氏族谱.pdf",
+      "stored_path": "uploads/xyz789.pdf",
+      "page_count": 3,
+      "dpi": 160
+    },
+    "pages": [
+      {
+        "page_no": 1,
+        "image_path": "uploads/a1b2c3d4-page-1.jpg",
+        "image_width": 1240,
+        "image_height": 1754,
+        "ocr_raw": "张始祖 字子明 德字辈",
+        "relation_desc": "第1代：张始祖（字子明）",
+        "annotations": [
+          { "id": "0-4-张始祖", "name": "张始祖", "start": 0, "end": 3, "source": "ai" }
+        ],
+        "parsed_persons": [
+          { "name": "张始祖", "generation": 1, "courtesy_name": "子明", "generation_name": "德" }
+        ],
+        "parsed_relations": [],
+        "status": "confirmed"
+      },
+      {
+        "page_no": 2,
+        "image_path": "uploads/a1b2c3d4-page-2.jpg",
+        "ocr_raw": "张长子 仁字辈\n张次子 义字辈",
+        "relation_desc": "第2代：张长子、张次子（均为张始祖之子）",
+        "parsed_persons": [
+          { "name": "张长子", "generation": 2, "generation_name": "仁" },
+          { "name": "张次子", "generation": 2, "generation_name": "义" }
+        ],
+        "parsed_relations": [
+          { "from": "张始祖", "to": "张长子", "type": "parent_child" },
+          { "from": "张始祖", "to": "张次子", "type": "parent_child" }
+        ],
+        "status": "confirmed"
+      }
+    ],
+    "merged": {
+      "ocr_raw": "（各页 OCR 按页码拼接，或保留 pages 引用）",
+      "relation_desc": "（跨页合并后的整谱关系描述）",
+      "custom": "（人工定稿）",
+      "persons": "（去重合并后的主谱成员，每人带 source_pages: [1,2]）",
+      "relations": "（跨页关系合并结果）"
+    }
+  },
+
+  "_与PDF转数字格式的差距": [
+    "当前：PDF 多页 OCR 后合并为一段文字 + 只存 1 张预览图/PDF 路径",
+    "当前：主谱是 persons + relations 结构化树，不是扫描版 1:1 复刻",
+    "缺失：pages[] 页级资产（每页图 + 每页文字 + 逐页对照 UI）",
+    "缺失：跨页去重合并（同一人出现在第 1、2 页）",
+    "缺失：成员字段 source_page / source_excerpt 与页码绑定"
+  ]
+}

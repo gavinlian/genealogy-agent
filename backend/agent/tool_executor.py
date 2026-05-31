@@ -18,6 +18,7 @@ from agent.agent_tools import (
     ui_prefill_person,
     ui_set_anchor,
     ui_switch_tab,
+    ui_organize_regenerate,
 )
 from agent.graph_store import GraphStore
 from agent.pending_actions import create_pending_action
@@ -81,6 +82,9 @@ def execute_read_tool(
     context: dict[str, Any],
     source_excerpt_fn=None,
     source_text: str = "",
+    cursor=None,
+    family_id: str = "",
+    relations: list[dict] | None = None,
 ) -> ToolResult:
     anchor = context.get("anchor_person_id")
     selected = context.get("selected_person_id")
@@ -240,7 +244,157 @@ def execute_read_tool(
         ui_actions.append(ui_open_scan())
         return ToolResult(True, "已打开扫描建谱。", ui_actions=ui_actions, tool_calls=tool_calls)
 
+    if tool_name == "fuse_source_versions":
+        if not cursor or not family_id:
+            return ToolResult(False, "融合需要族谱上下文。", tool_calls=tool_calls)
+        from agent.source_fusion import build_source_fusion
+
+        fusion = build_source_fusion(
+            cursor,
+            family_id,
+            tree_persons=persons,
+            tree_relations=relations or [],
+            include_tree=bool(params.get("include_tree", True)),
+        )
+        stats = fusion.get("stats") or {}
+        excerpt = (fusion.get("stepped_text") or "")[:3500]
+        summary = (
+            f"已融合 {stats.get('version_count', 0)} 个原文版本，"
+            f"合并 {stats.get('merged_relation_count', 0)} 条关系、"
+            f"{stats.get('merged_person_count', 0)} 位人物。\n\n"
+            f"{excerpt}"
+        )
+        if len(fusion.get("stepped_text") or "") > 3500:
+            summary += "\n\n（全文较长，可说「保存融合稿」写入原文版本。）"
+        ui_actions.append(ui_switch_tab("fusion"))
+        return ToolResult(
+            True,
+            summary,
+            ui_actions=ui_actions,
+            tool_calls=tool_calls,
+            state_patch={"active_tab": "fusion", "_fusion_preview": fusion.get("stepped_text")},
+            data=fusion,
+        )
+
     return ToolResult(False, f"未知读工具：{tool_name}", tool_calls=tool_calls)
+
+
+async def execute_regenerate_source_tool(
+    params: dict[str, Any],
+    *,
+    cursor,
+    family_id: str,
+    ai_configured: bool,
+) -> ToolResult:
+    """AI 重新生成版本一 OCR 或版本二关系描述，并写入原文版本库。"""
+    tool_calls = [{"tool": "regenerate_source_version", "params": params}]
+    if not cursor or not family_id:
+        return ToolResult(False, "重生原文需要族谱上下文。", tool_calls=tool_calls)
+    if not ai_configured:
+        return ToolResult(
+            False,
+            "AI 重生需要先在设置中配置 OCR / 关系解析模型。",
+            tool_calls=tool_calls,
+        )
+
+    kind = (params.get("kind") or params.get("target") or "relation_desc").strip().lower()
+    if kind in ("ocr", "v1", "version1", "ocr_raw", "ocr原文", "版本一"):
+        kind = "ocr_raw"
+    else:
+        kind = "relation_desc"
+
+    # 延迟导入，避免 main ↔ agent 循环依赖
+    from main import UPLOAD_DIR, call_text_model, call_vision_model, load_model_selection
+    from agent.source_regenerate import (
+        preview_excerpt,
+        regenerate_ocr_raw,
+        regenerate_relation_desc,
+    )
+
+    sel = load_model_selection()
+    ocr_cfg = sel.get("ocr") or {}
+    parse_cfg = sel.get("parse") or {}
+    ocr_provider = ocr_cfg.get("provider") or "minimax"
+    ocr_model = ocr_cfg.get("model") or ""
+    parse_provider = parse_cfg.get("provider") or "minimax"
+    parse_model = parse_cfg.get("model") or ""
+
+    async def vision_fn(provider, model, img, prompt):
+        return await call_vision_model(provider, model, img, prompt)
+
+    async def text_fn(provider, model, prompt, max_tokens=4096):
+        return await call_text_model(provider, model, prompt, max_tokens=max_tokens)
+
+    ui_actions: list[dict] = [ui_switch_tab("organize"), ui_organize_regenerate(kind, synced=True)]
+    state_patch: dict[str, Any] = {"active_tab": "organize"}
+
+    if kind == "ocr_raw":
+        result = await regenerate_ocr_raw(
+            cursor,
+            family_id,
+            UPLOAD_DIR,
+            ocr_provider=ocr_provider,
+            ocr_model=ocr_model,
+            vision_fn=vision_fn,
+        )
+    else:
+        from agent.regenerate_context import build_regenerate_context
+        from source_versions import VERSION_KIND_CUSTOM, VERSION_KIND_RELATION_DESC
+
+        persons_rows = cursor.execute(
+            "SELECT name FROM persons WHERE family_id = ?", (family_id,),
+        ).fetchall()
+        persons = [{"name": r["name"]} for r in persons_rows]
+        ctx = build_regenerate_context(cursor, family_id, persons=persons)
+        target_kind = VERSION_KIND_CUSTOM if kind == "custom" else VERSION_KIND_RELATION_DESC
+
+        result = await regenerate_relation_desc(
+            cursor,
+            family_id,
+            parse_provider=parse_provider,
+            parse_model=parse_model,
+            text_fn=text_fn,
+            ocr_text=(params.get("ocr_text") or "").strip() or None,
+            target_kind=target_kind,
+            context_notes=ctx.get("context_notes") or "",
+            previous_draft=ctx.get("previous_draft") or "",
+        )
+
+    tool_calls[0]["result"] = result
+    if not result.get("success"):
+        return ToolResult(
+            False,
+            result.get("error") or "AI 重生失败",
+            ui_actions=[ui_switch_tab("organize")],
+            tool_calls=tool_calls,
+            state_patch={"active_tab": "organize"},
+        )
+
+    text = (result.get("text") or "").strip()
+    char_count = result.get("char_count") or len(text)
+    label = "版本一 · OCR 原文" if kind == "ocr_raw" else (
+        "版本三 · 修正稿" if kind == "custom" else "版本二 · 关系描述"
+    )
+    excerpt = preview_excerpt(text, 320)
+    if result.get("used_ai"):
+        summary = (
+            f"已用 AI 重新生成【{label}】并写入原文库（共 {char_count} 字）。\n\n"
+            f"节选：\n{excerpt}\n\n"
+            "已打开整理页，请核对关系图后写入主谱。"
+        )
+    else:
+        summary = (
+            result.get("message")
+            or f"已生成【{label}】草稿（共 {char_count} 字）。\n\n节选：\n{excerpt}"
+        )
+    return ToolResult(
+        True,
+        summary,
+        ui_actions=ui_actions,
+        tool_calls=tool_calls,
+        state_patch=state_patch,
+        data=result,
+    )
 
 
 def propose_write_tool(
@@ -251,6 +405,7 @@ def propose_write_tool(
     family_id: str,
     graph: GraphStore,
     persons: list[dict],
+    relations: list[dict] | None = None,
     context: dict[str, Any],
 ) -> ToolResult:
     anchor = context.get("anchor_person_id")
@@ -305,6 +460,104 @@ def propose_write_tool(
                 "active_tab": "person",
                 "person_draft": {"person_id": subject_id, "patch": patch},
             },
+            confirmation=confirmation,
+        )
+
+    if tool_name == "propose_save_fusion":
+        from agent.source_fusion import build_source_fusion
+
+        stepped = (params.get("stepped_text") or params.get("fusion_text") or "").strip()
+        if not stepped:
+            fusion = build_source_fusion(
+                cursor,
+                family_id,
+                tree_persons=persons,
+                tree_relations=relations or [],
+                include_tree=True,
+            )
+            stepped = fusion.get("stepped_text") or ""
+        if not stepped:
+            return ToolResult(False, "暂无内容可保存为融合稿，请先执行多版本融合。", tool_calls=tool_calls)
+        preview = stepped[:800] + ("…" if len(stepped) > 800 else "")
+        summary = f"将保存「融合稿 · 多版合并」原文版本（约 {len(stepped)} 字）。"
+        token = create_pending_action(
+            cursor,
+            family_id,
+            tool_name,
+            {"stepped_text": stepped},
+            summary=summary,
+        )
+        confirmation = {
+            "token": token,
+            "tool": tool_name,
+            "title": "确认保存融合稿",
+            "summary": summary,
+            "details": {"preview": preview, "char_count": len(stepped)},
+        }
+        return ToolResult(
+            True,
+            summary + "\n\n请在下方卡片确认后写入原文版本库。",
+            ui_actions=[ui_switch_tab("source")],
+            tool_calls=tool_calls,
+            state_patch={"active_tab": "source"},
+            confirmation=confirmation,
+        )
+
+    if tool_name == "propose_merge_family":
+        from agent.family_merge import build_family_merge_preview, resolve_source_family_id
+
+        user_id = (context.get("user_id") or "local-default").strip()
+        source_id = resolve_source_family_id(
+            cursor,
+            user_id,
+            source_family_id=params.get("source_family_id"),
+            source_family_name=params.get("source_family_name"),
+            exclude_family_id=family_id,
+        )
+        if not source_id:
+            hint = "请说明要合并哪一份族谱（名称或 id）。"
+            if context.get("other_families"):
+                names = "、".join(
+                    f.get("name", "") for f in context["other_families"][:8] if f.get("name")
+                )
+                if names:
+                    hint += f" 可选：{names}"
+            return ToolResult(False, hint, tool_calls=tool_calls)
+        try:
+            preview = build_family_merge_preview(cursor, family_id, source_id, user_id)
+        except ValueError as exc:
+            return ToolResult(False, str(exc), tool_calls=tool_calls)
+        summary = preview.get("summary") or "族谱合并预览"
+        stats = preview.get("stats") or {}
+        token = create_pending_action(
+            cursor,
+            family_id,
+            tool_name,
+            {
+                "source_family_id": source_id,
+                "source_family_name": preview.get("source_family_name"),
+                "user_id": user_id,
+            },
+            summary=summary,
+        )
+        confirmation = {
+            "token": token,
+            "tool": tool_name,
+            "title": "确认合并族谱",
+            "summary": summary,
+            "details": {
+                "stats": stats,
+                "preview": preview.get("preview") or {},
+                "source_family_name": preview.get("source_family_name"),
+                "target_family_name": preview.get("target_family_name"),
+            },
+        }
+        return ToolResult(
+            True,
+            summary + "\n\n请在下方卡片确认后才会写入当前族谱。",
+            ui_actions=[ui_switch_tab("fusion")],
+            tool_calls=tool_calls,
+            state_patch={"active_tab": "fusion"},
             confirmation=confirmation,
         )
 
@@ -378,42 +631,31 @@ async def propose_organize_tool(
 
     diff = result.get("diff") or {}
     stats = (result.get("preview") or {}).get("stats") or {}
-    summary = result.get("explanation") or "已生成整理方案，请确认后应用。"
-    detail_lines = []
+    summary = result.get("explanation") or "已生成整理方案。"
+    apply_mode = params.get("apply_mode") or "merge"
+    from ai_organize_store import save_ai_chat_state
+
+    save_ai_chat_state(
+        cursor,
+        family_id,
+        {
+            "pending_plan": plan,
+            "pending_diff": diff,
+            "apply_mode": apply_mode,
+        },
+    )
     if stats:
-        detail_lines.append(
-            f"预计：+{stats.get('persons_added', 0)} 人，"
+        summary += (
+            f"\n预计：+{stats.get('persons_added', 0)} 人，"
             f"更新 {stats.get('persons_updated', 0)} 人，"
             f"关系 +{stats.get('relations_added', 0)}"
         )
-    payload = {
-        "plan": plan,
-        "apply_mode": params.get("apply_mode") or "merge",
-        "message": message,
-    }
-    token = create_pending_action(cursor, family_id, "propose_organize_plan", payload, summary=summary[:500])
-    confirmation = {
-        "token": token,
-        "tool": "propose_organize_plan",
-        "title": "确认应用整理方案",
-        "summary": summary,
-        "details": {
-            "stats": stats,
-            "diff_summary": {
-                "persons_added": len(diff.get("persons_added") or []),
-                "persons_updated": len(diff.get("persons_updated") or []),
-                "relations_added": len(diff.get("relations_added") or []),
-            },
-            "explanation": summary,
-        },
-    }
     return ToolResult(
         True,
-        summary + "\n\n请在下方卡片确认后才会写入主谱。",
+        summary + "\n\n已切到「整理」页，请核对关系卡片后点「写入主谱」。",
         ui_actions=[ui_switch_tab("organize")],
         tool_calls=[{"tool": "propose_organize_plan", "params": params, "used_ai": result.get("used_ai")}],
         state_patch={"active_tab": "organize"},
-        confirmation=confirmation,
         data={"plan": plan, "diff": diff},
     )
 
@@ -462,5 +704,37 @@ def apply_pending_action(
 
     if tool_name == "propose_organize_plan":
         return {"success": False, "error": "整理方案请在 main.apply 路径执行", "needs_main_apply": True, "payload": payload}
+
+    if tool_name == "propose_save_fusion":
+        from agent.source_fusion import save_fusion_as_version
+
+        text = (payload.get("stepped_text") or "").strip()
+        if not text:
+            return {"success": False, "error": "融合稿为空"}
+        version = save_fusion_as_version(cursor, family_id, text)
+        return {
+            "success": True,
+            "message": "已保存为多版本融合原文（融合稿版本）。",
+            "version_id": version.get("id"),
+        }
+
+    if tool_name == "propose_merge_family":
+        from agent.family_merge import apply_family_merge
+
+        source_id = (payload.get("source_family_id") or "").strip()
+        user_id = (payload.get("user_id") or "local-default").strip()
+        if not source_id:
+            return {"success": False, "error": "缺少源族谱 id"}
+        try:
+            result = apply_family_merge(
+                cursor, family_id, source_id, user_id, now, merge_ocr_text=True,
+            )
+        except ValueError as exc:
+            return {"success": False, "error": str(exc)}
+        return {
+            "success": True,
+            "message": result.get("message") or "族谱合并完成。",
+            **{k: v for k, v in result.items() if k not in ("success", "message")},
+        }
 
     return {"success": False, "error": f"不支持的应用操作：{tool_name}"}

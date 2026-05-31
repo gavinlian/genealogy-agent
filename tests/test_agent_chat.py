@@ -60,6 +60,51 @@ def test_agent_open_settings():
     assert any(a.get("type") == "open_settings" for a in turn.ui_actions)
 
 
+def test_agent_version_workflow_question():
+    persons, relations = _family_data()
+    msg = "整理好的文字填到版本2里面吗？之前版本2的文字都没整理好"
+    turn = run_agent_turn(msg, AgentContext(family_id="f1"), persons, relations)
+    assert "版本二" in turn.reply
+    assert "保存版本二" in turn.reply
+    assert "写入主谱" in turn.reply
+    assert "我可以帮您" not in turn.reply
+    assert any(a.get("type") == "switch_tab" and a.get("tab") == "organize" for a in turn.ui_actions)
+
+
+def test_agent_organize_intent_not_confused_with_workflow():
+    persons, relations = _family_data()
+    turn = run_agent_turn("整理族谱", AgentContext(family_id="f1"), persons, relations)
+    assert any(a.get("type") == "switch_tab" and a.get("tab") == "organize" for a in turn.ui_actions)
+    assert "整理" in turn.reply
+
+
+def test_agent_regenerate_ocr_intent():
+    persons, relations = _family_data()
+    turn = run_agent_turn(
+        "OCR识别不对，请再次生成完整的",
+        AgentContext(family_id="f1"),
+        persons,
+        relations,
+    )
+    assert any(a.get("type") == "organize_regenerate" and a.get("target") == "ocr_raw" for a in turn.ui_actions)
+    assert "版本一" in turn.reply or "OCR" in turn.reply
+
+
+def test_agent_regenerate_relation_intent():
+    persons, relations = _family_data()
+    turn = run_agent_turn(
+        "版本二关系描述不对，重新生成并填进去",
+        AgentContext(family_id="f1"),
+        persons,
+        relations,
+    )
+    assert any(
+        a.get("type") == "organize_regenerate" and a.get("target") == "relation_desc"
+        for a in turn.ui_actions
+    )
+    assert "关系描述" in turn.reply or "版本二" in turn.reply
+
+
 def test_agent_chat_api(client):
     create = client.post("/api/families", json={"name": "Agent测试"})
     fid = create.json()["id"]

@@ -105,16 +105,21 @@ export function layoutCardTree(persons: ViewPerson[], relations: ViewRelation[])
     }
   }
 
-  const childrenByParent = new Map<string, string[]>()
-  for (const rel of parentRels) {
-    if (!childrenByParent.has(rel.from)) childrenByParent.set(rel.from, [])
-    childrenByParent.get(rel.from)!.push(rel.to)
+  function unitKey(u: CardUnitLayout): string {
+    return u.persons.map((p) => p.name).sort().join('|')
   }
 
-  for (const [parentName, childNames] of childrenByParent) {
-    const parentUnit = nameToUnit.get(parentName)
+  const childrenByUnit = new Map<string, { unit: CardUnitLayout; childNames: Set<string> }>()
+  for (const rel of parentRels) {
+    const parentUnit = nameToUnit.get(rel.from)
     if (!parentUnit) continue
-    const childUnits = childNames
+    const key = unitKey(parentUnit)
+    if (!childrenByUnit.has(key)) childrenByUnit.set(key, { unit: parentUnit, childNames: new Set() })
+    childrenByUnit.get(key)!.childNames.add(rel.to)
+  }
+
+  for (const { unit: parentUnit, childNames } of childrenByUnit.values()) {
+    const childUnits = [...childNames]
       .map((n) => nameToUnit.get(n))
       .filter((u): u is CardUnitLayout => !!u && u.y > parentUnit.y)
     if (!childUnits.length) continue

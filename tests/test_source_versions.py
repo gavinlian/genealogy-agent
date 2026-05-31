@@ -7,12 +7,14 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
 
 from source_versions import (
+    attach_source_image,
     create_source_version,
     ensure_versions_table,
     list_source_versions,
     migrate_legacy_family_source,
     confirm_source_version,
     update_source_version,
+    VERSION_KIND_OCR_RAW,
 )
 
 
@@ -94,6 +96,37 @@ def test_delete_version_switches_active():
     assert result["active_version_id"] == v1
     payload = list_source_versions(c, "f1")
     assert len(payload["versions"]) == 1
+
+
+def test_update_version_preserves_image_path():
+    conn = _mem_db()
+    c = conn.cursor()
+    migrate_legacy_family_source(c, "f1")
+    vid = create_source_version(
+        c, "f1",
+        source_text="OCR 原文",
+        source_annotations=[],
+        label="版本一",
+        note="layout:horizontal_ltr|image:scan001.jpg",
+    )
+    updated = update_source_version(
+        c, "f1", vid,
+        source_text="OCR 修订",
+        image_path="scan002.jpg",
+    )
+    conn.commit()
+    assert updated["source_text"] == "OCR 修订"
+    assert updated["image_path"] == "scan002.jpg"
+
+
+def test_attach_source_image_creates_ocr_raw():
+    conn = _mem_db()
+    c = conn.cursor()
+    migrate_legacy_family_source(c, "f1")
+    version = attach_source_image(c, "f1", "legacy-scan.jpg")
+    conn.commit()
+    assert version["version_kind"] == VERSION_KIND_OCR_RAW
+    assert version["image_path"] == "legacy-scan.jpg"
 
 
 def test_delete_last_version_rejected():

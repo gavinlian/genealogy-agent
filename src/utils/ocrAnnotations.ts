@@ -102,3 +102,44 @@ export function annotationPayload(ann: NameAnnotation) {
     source: ann.source,
   })
 }
+
+/** 修正标注姓名：同步替换原文对应片段并重算标注位置 */
+export function renameAnnotationInText(
+  text: string,
+  annotations: NameAnnotation[],
+  annotationId: string,
+  newName: string,
+): { text: string; annotations: NameAnnotation[] } {
+  const trimmed = newName.trim()
+  if (!trimmed) return { text, annotations }
+  const ann = annotations.find((a) => a.id === annotationId)
+  if (!ann || ann.start < 0 || ann.end > text.length) {
+    return { text, annotations }
+  }
+  const nextText = text.slice(0, ann.start) + trimmed + text.slice(ann.end)
+  const delta = trimmed.length - (ann.end - ann.start)
+  const nextAnnotations = annotations
+    .map((a) => {
+      if (a.id === annotationId) {
+        const end = ann.start + trimmed.length
+        return {
+          ...a,
+          name: trimmed,
+          start: ann.start,
+          end,
+          id: makeAnnotationId(trimmed, ann.start, end),
+        }
+      }
+      if (a.start >= ann.end) {
+        return {
+          ...a,
+          start: a.start + delta,
+          end: a.end + delta,
+          id: makeAnnotationId(a.name, a.start + delta, a.end + delta),
+        }
+      }
+      return a
+    })
+    .filter((a) => a.start >= 0 && a.end <= nextText.length)
+  return { text: nextText, annotations: nextAnnotations.sort((a, b) => a.start - b.start) }
+}

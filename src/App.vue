@@ -10,7 +10,10 @@
       </div>
       <div class="header-actions">
         <button v-if="!currentFamily" class="btn-scan" @click="goOCR">扫描建谱</button>
-        <button class="btn-icon" title="AI 设置" @click="showSettings = true">⚙</button>
+        <button class="btn-icon" title="智能体发现" @click="openDiscoveriesGlobal">
+          🔔<span v-if="agentPendingCount" class="toolbar-badge">{{ agentPendingCount > 9 ? '9+' : agentPendingCount }}</span>
+        </button>
+        <button class="btn-icon" title="AI 设置" @click="openSettingsMenu">⚙</button>
       </div>
     </header>
 
@@ -20,13 +23,23 @@
         :family="currentFamily"
         :families="families"
         :families-loading="loading"
+        :source-text="activeSourceText"
+        :source-version-id="currentSourceVersionId || undefined"
+        :source-version-label="currentSourceVersion?.label || ''"
+        :requested-tab="chatRequestedTab"
         @select-family="viewFamily"
         @leave-family="leaveFamilyFromChat"
         @switch-classic="enterClassicWorkspace"
         @refresh="onChatShellRefresh"
         @create-family="showCreateModal = true"
         @scan="goOCR"
-        @settings="showSettings = true"
+        @settings="openSettingsMenu"
+        @open-discoveries="showDiscoveryPanel = true"
+        @open-agent-settings="showAgentSettings = true"
+        :agent-pending-count="agentPendingCount"
+        :agent-report="agentReport"
+        v-model:discovery-open="chatDiscoveryOpen"
+        @apply-discovery-plan="onDiscoveryPlan"
         @delete-family="requestDeleteFamily"
       />
 
@@ -48,20 +61,26 @@
               type="button"
               class="btn-secondary btn-sm"
               :class="{ 'btn-ghost': !showTextImportDrawer }"
-              @click="showTextImportDrawer = !showTextImportDrawer"
+              @click="showTextImportDrawer ? (showTextImportDrawer = false) : openSourceDrawer()"
             >
               原文{{ sourceVersionBadge }}
             </button>
             <button
               type="button"
               class="btn-secondary btn-sm"
-              :class="{ 'btn-ghost': !showOrganizeDrawer }"
-              @click="showOrganizeDrawer = !showOrganizeDrawer"
+              :class="{ 'btn-ghost': !showMergeDrawer }"
+              @click="showMergeDrawer = !showMergeDrawer"
             >
-              整理<span v-if="pendingOrganizePlan && planHasChanges(pendingOrganizePlan)" class="toolbar-badge">1</span>
+              合并整理
+            </button>
+            <button
+              type="button"
+              class="btn-secondary btn-sm"
+              @click="openOrganizeInChat"
+            >
+              整理组谱<span v-if="pendingOrganizePlan && planHasChanges(pendingOrganizePlan)" class="toolbar-badge">1</span>
             </button>
             <button type="button" class="btn-secondary btn-sm" @click="workspaceLayout = 'chat'">对话</button>
-            <button type="button" class="btn-secondary btn-sm" @click="openAiOrganize()">AI</button>
             <button
               type="button"
               class="btn-secondary btn-sm"
@@ -83,19 +102,38 @@
             <button
               class="btn-secondary btn-sm"
               :class="{ 'btn-ghost': !showTextImportDrawer }"
-              @click="showTextImportDrawer = !showTextImportDrawer"
+              @click="showTextImportDrawer ? (showTextImportDrawer = false) : openSourceDrawer()"
             >
               原文{{ sourceVersionBadge }}
             </button>
             <button class="btn-secondary btn-sm" @click="showRelationsDrawer = !showRelationsDrawer">关系</button>
             <button class="btn-ghost btn-sm" @click="openFamilyEdit">编辑族谱</button>
-            <button class="btn-secondary btn-sm" :class="{ 'btn-ghost': !showOrganizeDrawer }" @click="showOrganizeDrawer = !showOrganizeDrawer">
-              族谱整理<span v-if="pendingOrganizePlan && planHasChanges(pendingOrganizePlan)" class="toolbar-badge">1</span>
+            <button
+              v-if="currentFamily"
+              type="button"
+              class="btn-ghost btn-sm btn-danger-text"
+              @click="requestDeleteFamily(currentFamily)"
+            >
+              删除族谱
             </button>
-            <button class="btn-secondary btn-sm" @click="workspaceLayout = 'chat'">对话模式</button>
-            <button class="btn-secondary btn-sm" @click="openAiOrganize()" title="与 AI 对话，获取关系整理建议">
-              AI 整理
+            <button
+              class="btn-secondary btn-sm"
+              :class="{ 'btn-ghost': !showMergeDrawer }"
+              @click="showMergeDrawer = !showMergeDrawer"
+            >
+              合并整理
             </button>
+            <button class="btn-secondary btn-sm" @click="openOrganizeInChat">
+              整理组谱<span v-if="pendingOrganizePlan && planHasChanges(pendingOrganizePlan)" class="toolbar-badge">1</span>
+            </button>
+            <button
+              class="btn-secondary btn-sm"
+              :class="{ 'btn-ghost': !showDiscoveryPanel }"
+              @click="showDiscoveryPanel = !showDiscoveryPanel"
+            >
+              智能体发现<span v-if="agentPendingCount" class="toolbar-badge">{{ agentPendingCount > 9 ? '9+' : agentPendingCount }}</span>
+            </button>
+            <button class="btn-ghost btn-sm" @click="showAgentSettings = true">智能体设置</button>
             <button class="btn-ghost btn-sm" @click="rebuildFamily" :disabled="buildLoading || !persons.length" title="对比原文差异后补全关系">
               {{ buildLoading ? '整理中…' : '快速整理' }}
             </button>
@@ -106,7 +144,7 @@
 
         <div v-if="showTextImportDrawer" class="workspace-drawer ocr-text-drawer workspace-drawer--text">
           <div v-if="sourceVersions.length" class="source-version-bar">
-            <label class="source-version-label">原文版本</label>
+            <label class="source-version-label">存档版本</label>
             <select
               v-model="currentSourceVersionId"
               class="input input-inline source-version-select"
@@ -119,7 +157,7 @@
             <span v-if="currentSourceVersion?.status === 'confirmed'" class="source-version-tag confirmed">已确认</span>
             <span v-else class="source-version-tag draft">草稿</span>
             <button type="button" class="btn-xs" :disabled="sourceVersions.length < 2" @click="compareSourceVersions">
-              版本对比
+              对比
             </button>
             <button type="button" class="btn-xs" :disabled="!ocrEditableText.trim()" @click="saveAsNewSourceVersion">
               另存为…
@@ -132,59 +170,156 @@
             >
               确认此版
             </button>
-            <button
-              type="button"
-              class="btn-xs btn-danger"
-              :disabled="!currentSourceVersionId || sourceVersions.length <= 1"
-              title="至少保留一个原文版本"
-              @click="deleteCurrentSourceVersion"
-            >
-              删除此版
+          </div>
+
+          <div class="ocr-version-tabs source-drawer-version-tabs">
+            <button type="button" class="ocr-version-tab" :class="{ active: ocrVersionTab === 'v1' }" @click="selectClassicSourceTab('v1')">
+              版本一 · OCR 原文
+            </button>
+            <button type="button" class="ocr-version-tab" :class="{ active: ocrVersionTab === 'v2' }" @click="selectClassicSourceTab('v2')">
+              版本二 · 关系描述
+            </button>
+            <button type="button" class="ocr-version-tab" :class="{ active: ocrVersionTab === 'v3' }" @click="selectClassicSourceTab('v3')">
+              版本三 · 修正稿
             </button>
           </div>
-          <p v-if="sourceVersionDiff?.summary" class="hint source-version-diff-summary">{{ sourceVersionDiff.summary }}</p>
-          <pre v-if="sourceVersionDiff?.diff_lines?.length" class="source-version-diff-pre">{{ sourceVersionDiff.diff_lines.slice(0, 80).join('\n') }}</pre>
-          <p class="hint" style="margin:0 0 8px">
-            三版文字：版本一 OCR 原文（对应图片）→ 版本二 AI 关系描述（可组谱）→ 版本三 您的修正稿。组谱默认用版本二；确认版本三后可切换为定稿。
-          </p>
-          <OcrTextWorkspace
-            v-model="ocrEditableText"
-            v-model:annotations="ocrAnnotations"
-            :preview-persons="parsedPersons"
-            :preview-relations="parsedRelations"
-            :structured-text="ocrRelationDescription || ocrEditableText"
-            :view-title="currentFamily?.name || '族谱'"
-            :relation-link-from="relationLinkFromName"
-            compact
-            @add-person="addAnnotatedPersonToFamily"
-            @set-link-from="relationLinkFromName = $event"
-            @create-link="createRelationFromNames"
-            @clear-link="relationLinkFromName = null"
-          />
-          <div class="text-drawer-actions">
-            <button class="btn-xs" :disabled="!ocrEditableText.trim()" @click="saveFamilySourceText">
-              保存原文
-            </button>
-            <button class="btn-xs btn-primary" :disabled="syncPersonDetailsLoading || !persons.length || !activeSourceText.trim()" @click="syncPersonDetailsFromSource">
-              {{ syncPersonDetailsLoading ? '补全中…' : '从文字版补全成员资料' }}
-            </button>
-            <button class="btn-xs btn-primary" :disabled="ocrReparsing || !ocrEditableText.trim()" @click="applyTextParseToFamily">
-              {{ ocrReparsing ? '两阶段解析中…' : '两阶段解析并对比差异' }}
+
+          <div class="source-image-bar">
+            <img
+              v-if="familySourceImageUrl"
+              :src="familySourceImageUrl"
+              alt="族谱原文扫描图"
+              class="source-image-bar-thumb"
+            />
+            <span v-else class="source-image-bar-placeholder">尚未添加原文扫描图（请点「添加原图」或走扫描识别）</span>
+            <button type="button" class="btn-xs" @click="sourceImageInputRef?.click()">
+              {{ familySourceImageUrl ? '更换原图' : '添加原图' }}
             </button>
             <button
+              v-if="sourceImageDataUrl"
               type="button"
-              class="btn-xs btn-secondary"
-              :disabled="!ocrEditableText.trim()"
-              @click="openAiOrganize({ bootstrap: true })"
+              class="btn-xs btn-primary"
+              :disabled="sourceImageSaving"
+              @click="saveFamilySourceImage"
             >
-              改用 AI 对话整理
+              {{ sourceImageSaving ? '保存中…' : '保存原图' }}
             </button>
-            <button v-if="relationLinkFromName" class="btn-xs" @click="relationLinkFromName = null">取消连线</button>
+            <input
+              ref="sourceImageInputRef"
+              type="file"
+              accept="image/*"
+              class="ocr-image-file-input"
+              @change="onSourceImageFileSelect"
+            />
+          </div>
+
+          <p v-if="ocrVersionTab === 'v1'" class="hint source-drawer-hint">
+            左侧原图 ↔ 右侧 OCR 原文对照校对。识别有误可改字，或点「重新 OCR」。
+          </p>
+          <p v-else-if="ocrVersionTab === 'v2'" class="hint source-drawer-hint">
+            左侧版本一 · 右侧版本二关系描述。可 AI 从版本一生成，或插入格式样板后手改。
+          </p>
+          <p v-else class="hint source-drawer-hint">
+            左侧版本二 · 右侧版本三修正稿。定稿后由此版本生成族谱最准确。
+          </p>
+
+          <div v-show="ocrVersionTab === 'v1'">
+            <OcrTextWorkspace
+              v-model="ocrEditableText"
+              v-model:annotations="ocrAnnotations"
+              :preview-persons="parsedPersons"
+              :preview-relations="parsedRelations"
+              :structured-text="ocrRelationDescription || ocrEditableText"
+              :view-title="currentFamily?.name || '族谱'"
+              :relation-link-from="relationLinkFromName"
+              :prefer-pair-edit="Boolean(familySourceImageUrl || sourceImageDataUrl)"
+              :image-path="familySourceImagePath"
+              :image-preview="sourceImageDataUrl"
+              compact
+              @add-person="addAnnotatedPersonToFamily"
+              @set-link-from="relationLinkFromName = $event"
+              @create-link="createRelationFromNames"
+              @clear-link="relationLinkFromName = null"
+              @upload-image="onEditorSourceImageUpload"
+            />
+            <div class="source-drawer-version-actions">
+              <button
+                type="button"
+                class="btn-xs btn-secondary"
+                :disabled="ocrRegeneratingV1 || !familySourceImageUrl && !sourceImageDataUrl"
+                @click="regenerateOcrV1FromImage"
+              >
+                {{ ocrRegeneratingV1 ? '识别中…' : '重新 OCR（版本一）' }}
+              </button>
+            </div>
+          </div>
+
+          <div v-show="ocrVersionTab === 'v2'" class="ocr-version-editor">
+            <SourceTextPairView
+              v-model="ocrRelationDescription"
+              :baseline-text="ocrRawBaselineText"
+              baseline-label="版本一 · OCR 原文"
+              right-label="版本二 · 关系描述（可编辑）"
+              right-placeholder="对照左侧 OCR 原文，修改关系描述…"
+            />
+            <div class="source-drawer-version-actions">
+              <button
+                type="button"
+                class="btn-xs btn-secondary"
+                :disabled="ocrRegeneratingV2 || ocrDescribingV2 || !ocrEditableText.trim()"
+                @click="regenerateOcrV2"
+              >
+                {{ ocrRegeneratingV2 ? '生成中…' : '从版本一重新生成' }}
+              </button>
+              <button type="button" class="btn-xs" @click="insertRelationTextTemplate">插入格式样板</button>
+            </div>
+          </div>
+
+          <div v-show="ocrVersionTab === 'v3'" class="ocr-version-editor">
+            <SourceTextPairView
+              v-model="ocrCustomText"
+              :baseline-text="relationDescBaselineText || ocrRawBaselineText"
+              baseline-label="版本二 · 关系描述"
+              right-label="版本三 · 修正稿（可编辑）"
+              right-placeholder="对照左侧关系描述，修改您的修正稿…"
+            />
+            <div class="source-drawer-version-actions">
+              <button type="button" class="btn-xs" @click="initCustomFromV2">从版本二复制</button>
+            </div>
+          </div>
+
+          <details class="source-format-sample">
+            <summary>关系描述格式说明与样板</summary>
+            <p class="hint">{{ RELATION_TEXT_FORMAT_HINT }}</p>
+            <ul class="source-format-rules">
+              <li v-for="(rule, i) in RELATION_TEXT_FORMAT_RULES" :key="'r' + i">{{ rule }}</li>
+            </ul>
+            <pre class="source-format-template">{{ RELATION_TEXT_FORMAT_TEMPLATE }}</pre>
+            <button type="button" class="btn-xs" @click="insertRelationTextTemplate">插入到版本二</button>
+          </details>
+
+          <div class="text-drawer-actions text-drawer-actions--compact">
+            <button class="btn-xs btn-primary" :disabled="!hasCurrentVersionText" @click="saveFamilySourceText">
+              保存当前版本
+            </button>
+            <button
+              class="btn-xs btn-primary"
+              :disabled="ocrReparsing || !hasCurrentVersionText"
+              @click="generateGenealogyFromActiveVersion"
+            >
+              {{ ocrReparsing ? '解析中…' : `从${ocrVersionTab === 'v1' ? '版本一' : ocrVersionTab === 'v2' ? '版本二' : '版本三'}生成族谱` }}
+            </button>
+            <button class="btn-xs" :disabled="syncPersonDetailsLoading || !persons.length || !activeSourceText.trim()" @click="syncPersonDetailsFromSource">
+              {{ syncPersonDetailsLoading ? '补全中…' : '补全成员资料' }}
+            </button>
+            <button type="button" class="btn-xs btn-secondary" @click="openOrganizeInChat()">
+              整理组谱
+            </button>
           </div>
           <div v-if="textParseFailedHint" class="source-parse-fallback-hint">
             <span>{{ textParseFailedHint }}</span>
-            <button type="button" class="btn-xs btn-primary" @click="openAiOrganize({ bootstrap: true })">
-              打开 AI 对话整理
+            <button type="button" class="btn-xs btn-primary" @click="openOrganizeInChat()">
+              打开整理组谱
             </button>
           </div>
           <div v-if="pendingTextRelations.length" class="pending-relations-box">
@@ -197,6 +332,25 @@
             </ul>
           </div>
         </div>
+
+        <div v-if="showMergeDrawer && currentFamily?.id" class="workspace-drawer workspace-drawer--merge">
+          <FamilyMergePanel
+            :family-id="currentFamily.id"
+            :family-name="currentFamily.name"
+            @toast="(msg, kind) => showToast(msg, kind || 'info')"
+            @saved="onMergeSaved"
+            @open-organize="openOrganizeFromMerge"
+          />
+        </div>
+
+        <AgentDiscoveryPanel
+          v-if="showDiscoveryPanel"
+          v-model="showDiscoveryPanel"
+          :family-id="currentFamily.id"
+          @toast="(msg, kind) => showToast(msg, kind || 'info')"
+          @apply-plan="onDiscoveryPlanClassic"
+          @refresh="onDiscoveryRefresh"
+        />
 
         <div v-if="showSearchDrawer" class="workspace-drawer">
           <div class="search-box">
@@ -252,26 +406,6 @@
           <input type="file" ref="importFile" @change="handleImport" accept=".json" style="display:none"/>
         </div>
 
-        <GenealogyOrganizePanel
-          v-if="showOrganizeDrawer && currentFamily"
-          :family-id="currentFamily.id"
-          :member-count="persons.length"
-          :selected-person-id="selectedPersonId || undefined"
-          :selected-person-name="displayPerson?.name || ''"
-          :source-version-id="currentSourceVersionId || undefined"
-          :source-version-label="currentSourceVersion?.label || ''"
-          v-model:apply-mode="organizeApplyMode"
-          v-model:clean-slate="organizeCleanSlate"
-          :plan="pendingOrganizePlan"
-          :diff="pendingOrganizeDiff"
-          @update:plan="onOrganizePlanPatch"
-          @plan-edited="onOrganizePlanEdited"
-          @applied="onOrganizeApplied"
-          @cleared="onOrganizeCleared"
-          @open-ai-chat="openAiOrganize()"
-          @dismiss="dismissOrganizePlan"
-          @notify="(msg, type) => showToast(msg, type || 'info')"
-        />
 
         <div v-if="showRelationsDrawer" class="workspace-drawer">
           <div class="relation-editor">
@@ -351,7 +485,7 @@
                   :class="{ active: genealogyViewMode === 'page' }"
                   @click="genealogyViewMode = 'page'"
                 >
-                  谱页 · 右起世系
+                  谱页 · 竖排世系
                 </button>
                 <button
                   type="button"
@@ -360,18 +494,29 @@
                   :class="{ active: genealogyViewMode === 'card' }"
                   @click="genealogyViewMode = 'card'"
                 >
-                  卡片 · 竖排世代
+                  卡片 · 横排世代
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  class="ocr-view-mode-btn"
+                  :class="{ active: genealogyViewMode === 'graph' }"
+                  @click="genealogyViewMode = 'graph'"
+                >
+                  关系图
                 </button>
               </div>
               <span v-if="buildStats" class="hint canvas-stats-hint">
                 {{ buildStats.person_count }} 人 · {{ buildStats.relation_count }} 关系
               </span>
               <span class="toolbar-divider canvas-stats-hint"></span>
-              <button type="button" class="btn-xs" title="缩小" @click="referenceZoomOut">−</button>
-              <span class="canvas-zoom-label">{{ referenceZoomLabel }}</span>
-              <button type="button" class="btn-xs" title="放大" @click="referenceZoomIn">+</button>
-              <button type="button" class="btn-xs" @click="referenceFitView">适应</button>
-              <button type="button" class="btn-xs" @click="referenceZoomReset">100%</button>
+              <template v-if="genealogyViewMode !== 'graph'">
+                <button type="button" class="btn-xs" title="缩小" @click="referenceZoomOut">−</button>
+                <span class="canvas-zoom-label">{{ referenceZoomLabel }}</span>
+                <button type="button" class="btn-xs" title="放大" @click="referenceZoomIn">+</button>
+                <button type="button" class="btn-xs" @click="referenceFitView">适应</button>
+                <button type="button" class="btn-xs" @click="referenceZoomReset">100%</button>
+              </template>
             </div>
             <GenealogyReferenceViewport
               v-if="persons.length"
@@ -384,7 +529,7 @@
               :selected-person-id="selectedPersonId"
               @select="selectPersonFromReference"
             />
-            <div v-if="persons.length" class="canvas-touch-controls">
+            <div v-if="persons.length && genealogyViewMode !== 'graph'" class="canvas-touch-controls">
               <button type="button" class="canvas-touch-btn" aria-label="放大" @click="referenceZoomIn">+</button>
               <button type="button" class="canvas-touch-btn canvas-touch-btn--fit" aria-label="适应" @click="referenceFitView">⊡</button>
               <button type="button" class="canvas-touch-btn" aria-label="缩小" @click="referenceZoomOut">−</button>
@@ -412,8 +557,8 @@
               </div>
             </div>
             <div v-if="!displayPerson" class="detail-body detail-empty">
-              <p>在左侧「世代导航」或中间<strong>谱页 / 卡片</strong>中点击成员，查看详情</p>
-              <p class="hint">谱页：右起世系竖排 · 卡片：按代竖排姓名</p>
+              <p>在左侧「世代导航」或中间<strong>谱页 / 卡片 / 关系图</strong>中点击成员，相关关系会高亮、其余弱化</p>
+              <p class="hint">谱页：传统竖排世系 · 卡片：按代横排 · 关系图：网络浏览（可选）</p>
             </div>
             <div v-else class="detail-body">
               <div class="detail-field">
@@ -487,118 +632,14 @@
       </section>
     </main>
 
-      <!-- 设置页 -->
-    <div v-if="showSettings" class="modal">
-      <div class="modal-content modal-lg ai-settings-modal">
-        <div class="ai-settings-header">
-          <h3>AI 设置</h3>
-          <button class="btn-close" @click="showSettings = false">×</button>
-        </div>
-
-        <p class="settings-hint">
-          MiniMax 需填写 <strong>API Key</strong> 和 <strong>Group ID</strong>（控制台 → 基础信息）。
-          Group ID 会放在请求头 <code>GroupId</code> 里发送。
-        </p>
-
-        <div class="provider-tabs">
-          <div
-            v-for="p in providers"
-            :key="p.id"
-            :class="['tab-item', { active: keyTab === p.id }]"
-            @click="keyTab = p.id"
-          >
-            <span class="tab-name">{{ providerLabel(p) }}</span>
-            <span v-if="providerKeys[p.id]?.configured" class="tab-dot"></span>
-            <span v-if="p.is_free" class="tab-badge">免费</span>
-          </div>
-        </div>
-
-        <div class="settings-group">
-          <label>{{ providerLabel(activeProvider) }} API Key</label>
-          <input
-            v-if="providerKeys[keyTab]"
-            v-model="providerKeys[keyTab].api_key"
-            type="password"
-            :placeholder="providerKeys[keyTab]?.configured ? '已保存，输入新 Key 可覆盖' : '输入 API Key'"
-            class="input"
-          />
-          <input
-            v-if="keyTab === 'minimax' && providerKeys[keyTab]"
-            v-model="providerKeys[keyTab].group_id"
-            type="text"
-            placeholder="Group ID（控制台基础信息，必填）"
-            class="input"
-          />
-          <input
-            v-if="keyTab === 'custom' && providerKeys[keyTab]"
-            v-model="providerKeys[keyTab].api_base"
-            type="text"
-            placeholder="API Base URL"
-            class="input"
-          />
-          <div class="test-row">
-            <button class="btn-test" :disabled="testStatus.key.loading" @click="testAIModel('key')">
-              {{ testStatus.key.loading ? '测试中…' : '测试 API Key' }}
-            </button>
-          </div>
-          <div
-            v-if="testStatus.key.loading || testStatus.key.message"
-            class="test-banner"
-            :class="testStatus.key.loading ? 'pending' : (testStatus.key.ok ? 'ok' : 'fail')"
-          >
-            <template v-if="testStatus.key.loading">正在连接 {{ providerLabel(activeProvider) }}…</template>
-            <template v-else>
-              {{ testStatus.key.ok ? '✓' : '✗' }} {{ testStatus.key.message }}
-              <span v-if="testStatus.key.latency" class="test-latency">（{{ testStatus.key.latency }}ms）</span>
-            </template>
-          </div>
-          <p v-if="testStatus.key.preview && !testStatus.key.loading" class="test-preview">模型回复：{{ testStatus.key.preview }}</p>
-        </div>
-
-        <div class="model-row">
-          <span class="model-label">OCR 识别</span>
-          <select v-model="ocrConfig.provider" class="input input-inline" @change="onOcrProviderChange">
-            <option v-for="p in visionProviders" :key="p.id" :value="p.id">{{ providerLabel(p) }}</option>
-          </select>
-          <select v-if="ocrModelOptions.length" v-model="ocrConfig.model" class="input input-inline">
-            <option v-for="m in ocrModelOptions" :key="m" :value="m">{{ m }}</option>
-          </select>
-          <input v-else v-model="ocrConfig.model" class="input input-inline" placeholder="模型名称"/>
-          <button class="btn-test" :disabled="testStatus.ocr.loading" @click="testAIModel('ocr')">
-            {{ testStatus.ocr.loading ? '测试中…' : '测试' }}
-          </button>
-        </div>
-        <p v-if="testStatus.ocr.message" :class="['test-result', 'test-result-block', testStatus.ocr.ok ? 'ok' : 'fail']">
-          OCR：{{ testStatus.ocr.ok ? '✓' : '✗' }} {{ testStatus.ocr.message }}
-          <template v-if="testStatus.ocr.latency">（{{ testStatus.ocr.latency }}ms）</template>
-          <span v-if="testStatus.ocr.preview" class="test-preview-inline"> – {{ testStatus.ocr.preview }}</span>
-        </p>
-
-        <div class="model-row">
-          <span class="model-label">关系解析（初步分析）</span>
-          <select v-model="parseConfig.provider" class="input input-inline" @change="onParseProviderChange">
-            <option v-for="p in providers" :key="p.id" :value="p.id">{{ providerLabel(p) }}</option>
-          </select>
-          <select v-if="parseModelOptions.length" v-model="parseConfig.model" class="input input-inline">
-            <option v-for="m in parseModelOptions" :key="m" :value="m">{{ m }}</option>
-          </select>
-          <input v-else v-model="parseConfig.model" class="input input-inline" placeholder="模型名称"/>
-          <button class="btn-test" :disabled="testStatus.parse.loading" @click="testAIModel('parse')">
-            {{ testStatus.parse.loading ? '测试中…' : '测试' }}
-          </button>
-        </div>
-        <p v-if="testStatus.parse.message" :class="['test-result', 'test-result-block', testStatus.parse.ok ? 'ok' : 'fail']">
-          解析：{{ testStatus.parse.ok ? '✓' : '✗' }} {{ testStatus.parse.message }}
-          <template v-if="testStatus.parse.latency">（{{ testStatus.parse.latency }}ms）</template>
-          <span v-if="testStatus.parse.preview" class="test-preview-inline"> – {{ testStatus.parse.preview }}</span>
-        </p>
-
-        <div class="modal-actions">
-          <button class="btn-secondary" @click="showSettings = false">取消</button>
-          <button class="btn-primary" @click="saveAISettings">保存</button>
-        </div>
-      </div>
-    </div>
+      <!-- AI 设置 -->
+    <AiSettingsPanel v-model="showSettings" />
+    <AgentSettingsPanel
+      v-model="showAgentSettings"
+      :families="families"
+      @toast="(msg, kind) => showToast(msg, kind || 'info')"
+      @saved="refreshAgentPending"
+    />
 
     <!-- OCR 扫描全流程 -->
     <div v-if="showOCR" class="ocr-overlay">
@@ -628,26 +669,32 @@
             <button class="btn-secondary" @click="showCreateModal = true; showOCR = false">+ 新建族谱</button>
           </div>
 
-          <!-- 上传图片 -->
-          <div v-if="ocrStep === 'upload'" class="ocr-step">
-            <p class="hint">上传族谱照片（支持拍照或相册）</p>
-            <div class="upload-box" @click="fileInput?.click()">
-              <div v-if="!previewImage">
-                <div class="upload-icon">📷</div>
-                <p>点击拍照/选择照片</p>
+          <!-- 上传图片 / PDF -->
+          <div v-if="ocrStep === 'upload'" class="ocr-step ocr-step-upload">
+            <p class="ocr-upload-title">上传族谱照片或 PDF</p>
+            <p class="hint ocr-upload-sub">支持 JPG / PNG / PDF；PDF 将逐页识别并合并为版本一原文</p>
+            <div class="ocr-upload-preview" @click="fileInput?.click()">
+              <img v-if="previewImage" :src="previewImage" alt="预览" class="ocr-upload-image" />
+              <div v-else-if="ocrUploadKind === 'pdf' && ocrPdfInfo" class="ocr-upload-placeholder ocr-pdf-placeholder">
+                <span class="upload-icon">📄</span>
+                <span>已选择 PDF</span>
+                <span class="ocr-pdf-meta">{{ ocrPdfInfo.page_count || 0 }} 页{{ ocrPdfInfo.title ? ` · ${ocrPdfInfo.title}` : '' }}</span>
               </div>
-              <img v-else :src="previewImage" class="preview-image"/>
+              <div v-else class="ocr-upload-placeholder">
+                <span class="upload-icon">📷</span>
+                <span>点击选择照片、PDF 或拍照</span>
+              </div>
             </div>
-            <input type="file" ref="fileInput" @change="handleImageSelect" accept="image/*" style="display:none" />
+            <input type="file" ref="fileInput" @change="handleImageSelect" accept="image/*,application/pdf,.pdf" style="display:none" />
 
-            <div v-if="ocrLoading" class="loading">正在识别图片文字…</div>
-            <p v-if="previewImage && !ocrLoading" class="ocr-model-hint">
-              OCR: {{ providerLabel(getProvider(ocrConfig.provider)) }} / {{ ocrConfig.model }}
-              · 解析: {{ providerLabel(getProvider(parseConfig.provider)) }} / {{ parseConfig.model }}
-            </p>
-
-            <div class="ocr-actions">
-              <button v-if="previewImage && !ocrLoading" class="btn-primary" @click="doOCR">开始识别</button>
+            <div v-if="ocrLoading" class="loading ocr-upload-loading">
+              {{ ocrUploadKind === 'pdf' ? `正在识别 PDF${ocrPdfInfo?.page_count ? `（${ocrPdfInfo.page_count} 页）` : ''}…` : '正在识别…' }}
+            </div>
+            <div v-else class="ocr-upload-actions">
+              <button v-if="previewImage || ocrPdfBase64" type="button" class="btn-secondary" @click="clearOcrUpload">换一个</button>
+              <button v-if="previewImage || ocrPdfBase64" type="button" class="btn-primary" @click="doOCR">
+                {{ ocrUploadKind === 'pdf' ? '开始识别全部页面' : '开始识别' }}
+              </button>
             </div>
           </div>
 
@@ -670,9 +717,9 @@
                     版本三 · 修正稿
                   </button>
                 </div>
-                <p v-if="ocrVersionTab === 'v1'" class="hint ocr-version-hint">对应扫描图片的忠实 OCR 转写，可标注姓名、可编辑。</p>
-                <p v-else-if="ocrVersionTab === 'v2'" class="hint ocr-version-hint">AI 从版本一整理的关系描述稿，用于数字化组谱（可重新生成）。</p>
-                <p v-else class="hint ocr-version-hint">您的手工修正（可与原文无关）；保存后可用于对比与定稿。</p>
+                <p v-if="ocrVersionTab === 'v1'" class="hint ocr-version-hint">原图 ↔ OCR 原文对照；姓名标签点 ✎ 可改错字。</p>
+                <p v-else-if="ocrVersionTab === 'v2'" class="hint ocr-version-hint">左侧版本一 OCR 原文 · 右侧版本二关系描述（可改）。</p>
+                <p v-else class="hint ocr-version-hint">左侧版本二关系描述 · 右侧版本三修正稿（可改）。</p>
 
                 <div v-show="ocrVersionTab === 'v1'">
                   <OcrTextWorkspace
@@ -683,6 +730,9 @@
                     :structured-text="ocrRelationDescription || ocrEditableText"
                     view-title="扫描识别"
                     :image-preview="previewImage"
+                    :image-path="ocrScanImagePath"
+                    :prefer-pair-edit="true"
+                    minimal
                     :relation-link-from="relationLinkFromName"
                     @add-person="addAnnotatedPersonToParsed"
                     @set-link-from="relationLinkFromName = $event"
@@ -692,22 +742,20 @@
                 </div>
 
                 <div v-show="ocrVersionTab === 'v2'" class="ocr-version-editor">
-                  <div class="ocr-relation-desc-header">
-                    <strong>版本二 · 关系描述稿</strong>
-                    <span v-if="ocrParseSteps.length" class="hint">流程：{{ ocrParseSteps.join(' → ') }}</span>
-                  </div>
                   <div v-if="ocrDescribingV2 && !ocrRelationDescription.trim()" class="ocr-describing-placeholder">
                     <span class="ocr-describing-spinner" aria-hidden="true"></span>
                     正在根据版本一整理人物关系，请稍候…
                   </div>
-                  <textarea
+                  <SourceTextPairView
                     v-else
                     v-model="ocrRelationDescription"
-                    class="input ocr-version-textarea"
-                    rows="14"
-                    placeholder="扫描完成后自动生成；也可从版本一重新生成"
+                    :baseline-text="ocrEditableText"
+                    baseline-label="版本一 · OCR 原文"
+                    right-label="版本二 · 关系描述"
+                    right-placeholder="对照左侧修改关系描述…"
                   />
                   <div class="ocr-relation-desc-actions">
+                    <span v-if="ocrParseSteps.length" class="hint">流程：{{ ocrParseSteps.join(' → ') }}</span>
                     <button
                       type="button"
                       class="btn-xs btn-secondary"
@@ -716,36 +764,41 @@
                     >
                       {{ ocrRegeneratingV2 ? '生成中…' : '从版本一重新生成' }}
                     </button>
-                    <button type="button" class="btn-xs" @click="copyRelationDescription">复制</button>
                   </div>
                 </div>
 
                 <div v-show="ocrVersionTab === 'v3'" class="ocr-version-editor">
-                  <div class="ocr-relation-desc-header">
-                    <strong>版本三 · 修正稿</strong>
+                  <SourceTextPairView
+                    v-model="ocrCustomText"
+                    :baseline-text="ocrRelationDescription || ocrEditableText"
+                    baseline-label="版本二 · 关系描述"
+                    right-label="版本三 · 修正稿"
+                    right-placeholder="对照左侧修改修正稿…"
+                  />
+                  <div class="ocr-relation-desc-actions">
                     <button type="button" class="btn-xs" @click="initCustomFromV2">从版本二复制</button>
                   </div>
-                  <textarea
-                    v-model="ocrCustomText"
-                    class="input ocr-version-textarea"
-                    rows="14"
-                    placeholder="在此修正 OCR 错误或补充关系；可与版本一无关"
-                  />
                 </div>
 
                 <div class="ocr-reparse-row">
+                  <button
+                    type="button"
+                    class="btn-secondary btn-sm"
+                    @click="showOcrTreePreview = !showOcrTreePreview"
+                  >
+                    {{ showOcrTreePreview ? '收起族谱预览' : '族谱预览' }}
+                  </button>
                   <button
                     class="btn-secondary btn-sm"
                     :disabled="ocrReparsing || ocrDescribingV2 || !digitizeSourceText.trim()"
                     @click="reparseFromEditedText"
                   >
-                    {{ ocrReparsing ? '数字化解析中…' : '从组谱用文字解析入库预览' }}
+                    {{ ocrReparsing ? '数字化解析中…' : '解析入库预览' }}
                   </button>
-                  <span class="hint">优先版本三 → 版本二 → 版本一</span>
                 </div>
               </div>
 
-              <div class="ocr-result-right">
+              <div v-if="showOcrTreePreview" class="ocr-result-right">
             <div v-if="ocrDescribingV2 && !genealogyStats" class="ocr-describing-placeholder ocr-describing-placeholder-compact">
               <span class="ocr-describing-spinner" aria-hidden="true"></span>
               正在整理人物关系并生成族谱预览…
@@ -869,9 +922,19 @@
           <p class="hint">始祖记为第 {{ familyForm.start_generation || 1 }} 代；修改后将自动重算全谱世代。</p>
           <button type="button" class="btn-xs" @click="recalculateGenerations">立即重算世代</button>
         </div>
-        <div class="modal-actions">
-          <button class="btn-secondary" @click="showFamilyModal = false">取消</button>
-          <button class="btn-primary" @click="saveFamily">保存</button>
+        <div class="modal-actions modal-actions-spread">
+          <button
+            v-if="currentFamily"
+            type="button"
+            class="btn-danger-outline"
+            @click="showFamilyModal = false; requestDeleteFamily(currentFamily)"
+          >
+            删除族谱
+          </button>
+          <div class="modal-actions-right">
+            <button class="btn-secondary" @click="showFamilyModal = false">取消</button>
+            <button class="btn-primary" @click="saveFamily">保存</button>
+          </div>
         </div>
       </div>
     </div>
@@ -1053,18 +1116,6 @@
       @open-source="openSourceFromCompare"
     />
 
-    <AiOrganizeDialog
-      v-if="showAiOrganize && currentFamily"
-      :family-id="currentFamily.id"
-      :source-text="activeSourceText"
-      :source-version-id="currentSourceVersionId || undefined"
-      :source-version-label="currentSourceVersion?.label || ''"
-      :initial-prompt="aiOrganizeInitialPrompt"
-      :bootstrap-from-source="aiOrganizeBootstrap"
-      v-model:clean-slate="organizeCleanSlate"
-      @close="closeAiOrganize"
-      @plan-update="onAiPlanUpdate"
-    />
 
     <div v-if="deleteFamilyModal" class="modal">
       <div class="modal-content">
@@ -1103,17 +1154,24 @@ import { buildPersonTree, flattenNavTree, collectAllNavIds } from './utils/treeN
 import GenealogyReferenceViewport from './components/view/GenealogyReferenceViewport.vue'
 import GenealogyReferenceView, { type ReferenceViewMode } from './components/view/GenealogyReferenceView.vue'
 import OcrTextWorkspace from './components/OcrTextWorkspace.vue'
-import AiOrganizeDialog from './components/AiOrganizeDialog.vue'
+import SourceTextPairView from './components/SourceTextPairView.vue'
 import FamilyChatShell from './components/FamilyChatShell.vue'
-import GenealogyOrganizePanel from './components/GenealogyOrganizePanel.vue'
+import AiSettingsPanel from './components/AiSettingsPanel.vue'
+import FamilyMergePanel from './components/FamilyMergePanel.vue'
+import AgentSettingsPanel from './components/AgentSettingsPanel.vue'
+import AgentDiscoveryPanel from './components/AgentDiscoveryPanel.vue'
 import SourceCompareDialog, { type SourceCompareData } from './components/SourceCompareDialog.vue'
 import { type OrganizePlan, type OrganizeDiff, planHasChanges, pickDefaultApplyMode } from './types/organize'
 import { type NameAnnotation, NAME_DRAG_MIME } from './utils/ocrAnnotations'
+import { RELATION_TEXT_FORMAT_HINT, RELATION_TEXT_FORMAT_TEMPLATE, RELATION_TEXT_FORMAT_RULES } from './constants/relationTextFormat'
+import { compressImageFile } from './utils/compressImage'
+import { uploadImageUrl } from './utils/uploadImageUrl'
+import { api, API_TIMEOUT_LONG, pingBackend } from './utils/api'
 
-const API = '/api'
 const { toasts, show: showToast } = useToast()
 
 const workspaceLayout = ref<'chat' | 'classic'>('chat')
+const chatRequestedTab = ref<'tree' | 'source' | 'fusion' | 'organize' | 'discoveries' | null>(null)
 const families = ref<any[]>([])
 const currentFamily = ref<any>(null)
 const persons = ref<any[]>([])
@@ -1142,7 +1200,6 @@ const touchCanvas = ref({
 const showSearchDrawer = ref(false)
 const showExportDrawer = ref(false)
 const showRelationsDrawer = ref(false)
-const showOrganizeDrawer = ref(false)
 const showTextImportDrawer = ref(false)
 const detailMobileOpen = ref(false)
 const showMobileToolbarMenu = ref(false)
@@ -1165,109 +1222,27 @@ const familyForm = ref({
 const personFilter = ref('')
 const showOCR = ref(false)
 const showSettings = ref(false)
+const showAgentSettings = ref(false)
+const showDiscoveryPanel = ref(false)
+const chatDiscoveryOpen = ref(false)
+const agentPendingCount = ref(0)
+const agentReport = ref('')
+const showMergeDrawer = ref(false)
 const editingPerson = ref<any>(null)
 const importFile = ref<HTMLInputElement | null>(null)
 const fileInput = ref<HTMLInputElement | null>(null)
 
-// AI 閰嶇疆
-const providers = ref<any[]>([])
-const keyTab = ref('minimax')
-const providerKeys = ref<Record<string, { api_key: string; api_base: string; group_id?: string; configured?: boolean }>>({})
-const ocrConfig = ref({ provider: 'minimax', model: 'MiniMax-M2.7' })
-const parseConfig = ref({ provider: 'minimax', model: 'MiniMax-M2.7' })
-
-type TestState = { loading: boolean; ok: boolean | null; message: string; preview: string; latency: number }
-const emptyTest = (): TestState => ({ loading: false, ok: null, message: '', preview: '', latency: 0 })
-const testStatus = ref<Record<'key' | 'ocr' | 'parse', TestState>>({
-  key: emptyTest(),
-  ocr: emptyTest(),
-  parse: emptyTest(),
-})
-
-const visionProviders = computed(() =>
-  providers.value.filter(p => p.supports_vision && (p.vision_models?.length || p.vision_model))
-)
-
-const ocrModelOptions = computed(() => {
-  const p = providers.value.find(item => item.id === ocrConfig.value.provider)
-  if (!p) return []
-  const list = p.vision_models?.length ? p.vision_models : (p.vision_model ? [p.vision_model] : [])
-  if (ocrConfig.value.model && !list.includes(ocrConfig.value.model)) {
-    return [ocrConfig.value.model, ...list]
-  }
-  return list
-})
-
-const parseModelOptions = computed(() => {
-  const p = providers.value.find(item => item.id === parseConfig.value.provider)
-  if (!p) return []
-  const list = p.text_models?.length ? p.text_models : (p.text_model ? [p.text_model] : [])
-  if (parseConfig.value.model && !list.includes(parseConfig.value.model)) {
-    return [parseConfig.value.model, ...list]
-  }
-  return list
-})
-
-
-const activeProvider = computed(() =>
-  providers.value.find(p => p.id === keyTab.value) || { id: 'minimax', label: 'MiniMax' }
-)
-
-function providerLabel(p: { id?: string; label?: string; name?: string }) {
-  return p.label || p.name || p.id || ''
-}
-
-function getProvider(id: string) {
-  return providers.value.find(p => p.id === id) || { id, label: id }
-}
-
-function initProviderKeys(list: any[]) {
-  const keys: Record<string, { api_key: string; api_base: string; group_id?: string; configured?: boolean }> = {}
-  for (const p of list) {
-    keys[p.id] = providerKeys.value[p.id] || {
-      api_key: '',
-      api_base: p.id === 'custom' ? '' : (p.api_base || ''),
-      group_id: '',
-      configured: false,
-    }
-  }
-  providerKeys.value = keys
-}
-
-async function fetchProviders() {
-  try {
-    const res = await api('GET', '/ai/providers')
-    providers.value = res
-    initProviderKeys(res)
-  } catch {
-    providers.value = [
-      { id: 'minimax', name: 'MiniMax', label: 'MiniMax', vision_model: 'MiniMax-M2.7', text_model: 'MiniMax-M2.7', vision_models: ['MiniMax-M2.7', 'MiniMax-Text-01', 'MiniMax-Image-01'], text_models: ['MiniMax-M2.7', 'abab6.5s-chat', 'MiniMax-Text-01'], is_free: false, supports_vision: true },
-      { id: 'siliconflow', name: 'SiliconFlow', label: '硅基流动', vision_model: 'Qwen/Qwen2-VL-72B-Instruct', text_model: 'Qwen/Qwen2.5-72B-Instruct', vision_models: ['Qwen/Qwen2-VL-72B-Instruct'], text_models: ['Qwen/Qwen2.5-72B-Instruct', 'deepseek-ai/DeepSeek-V3'], is_free: true, supports_vision: true },
-      { id: 'qwen', name: 'Qwen', label: '通义千问', vision_model: 'qwen-vl-plus', text_model: 'qwen-plus', vision_models: ['qwen-vl-plus', 'qwen-vl-max'], text_models: ['qwen-plus', 'qwen-turbo', 'qwen-max'], is_free: false, supports_vision: true },
-      { id: 'openai', name: 'OpenAI', label: 'OpenAI', vision_model: 'gpt-4o', text_model: 'gpt-4o', vision_models: ['gpt-4o', 'gpt-4o-mini'], text_models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo'], is_free: false, supports_vision: true },
-      { id: 'deepseek', name: 'DeepSeek', label: 'DeepSeek', vision_model: '', text_model: 'deepseek-chat', vision_models: [], text_models: ['deepseek-chat', 'deepseek-coder'], is_free: true, supports_vision: false },
-      { id: 'zhipu', name: 'GLM', label: '智谱 GLM', vision_model: 'glm-4v-9b', text_model: 'glm-4-plus', vision_models: ['glm-4v-9b', 'glm-4v-plus'], text_models: ['glm-4-plus', 'glm-4-flash'], is_free: false, supports_vision: true },
-      { id: 'custom', name: 'Custom', label: '自定义', vision_model: '', text_model: '', vision_models: [], text_models: [], is_free: false, supports_vision: true },
-    ]
-    initProviderKeys(providers.value)
-  }
-}
-
-function onOcrProviderChange() {
-  const p = providers.value.find(item => item.id === ocrConfig.value.provider)
-  const models = p?.vision_models?.length ? p.vision_models : (p?.vision_model ? [p.vision_model] : [])
-  if (models.length) ocrConfig.value.model = models[0]
-}
-
-function onParseProviderChange() {
-  const p = providers.value.find(item => item.id === parseConfig.value.provider)
-  const models = p?.text_models?.length ? p.text_models : (p?.text_model ? [p.text_model] : [])
-  if (models.length) parseConfig.value.model = models[0]
-}
-
-// OCR 鐩稿叧
+// OCR 相关
 const ocrStep = ref('')
 const previewImage = ref('')
+const ocrScanImagePath = ref('')
+const ocrScanPdfPath = ref('')
+const ocrUploadKind = ref<'image' | 'pdf'>('image')
+const ocrPdfBase64 = ref('')
+const ocrPdfInfo = ref<{ page_count?: number; title?: string } | null>(null)
+const sourceImageDataUrl = ref('')
+const sourceImageInputRef = ref<HTMLInputElement | null>(null)
+const sourceImageSaving = ref(false)
 const ocrResult = ref<any>({ text: '' })
 const parsedPersons = ref<any[]>([])
 const ocrLoading = ref(false)
@@ -1280,6 +1255,7 @@ const ocrRelationDescription = ref('')
 const ocrCustomText = ref('')
 const ocrVersionTab = ref<'v1' | 'v2' | 'v3'>('v1')
 const sourceVersionDiff = ref<any>(null)
+const ocrRegeneratingV1 = ref(false)
 const ocrRegeneratingV2 = ref(false)
 const ocrDescribingV2 = ref(false)
 const ocrParseSteps = ref<string[]>([])
@@ -1325,9 +1301,6 @@ const genealogyStats = ref<any>(null)
 const treePreviewNodes = ref<any[]>([])
 const buildStats = ref<any>(null)
 const buildLoading = ref(false)
-const showAiOrganize = ref(false)
-const aiOrganizeInitialPrompt = ref('')
-const aiOrganizeBootstrap = ref(false)
 const pendingOrganizePlan = ref<OrganizePlan | null>(null)
 const pendingOrganizeDiff = ref<OrganizeDiff | null>(null)
 const organizeApplyMode = ref<'merge' | 'replace'>('merge')
@@ -1478,6 +1451,41 @@ const currentSourceVersion = computed(() =>
   sourceVersions.value.find((v) => v.id === currentSourceVersionId.value) || null,
 )
 
+const ocrRawSourceVersion = computed(() =>
+  sourceVersions.value.find((v) => v.version_kind === 'ocr_raw') || null,
+)
+
+const isOcrRawSourceVersion = computed(() => {
+  const k = currentSourceVersion.value?.version_kind
+  return !k || k === 'ocr_raw'
+})
+
+const isRelationDescSourceVersion = computed(() =>
+  currentSourceVersion.value?.version_kind === 'relation_desc',
+)
+
+const isCustomSourceVersion = computed(() =>
+  currentSourceVersion.value?.version_kind === 'custom',
+)
+
+const ocrRawBaselineText = computed(() =>
+  (ocrRawSourceVersion.value?.source_text || ocrEditableText.value || '').trim(),
+)
+
+const relationDescBaselineText = computed(() =>
+  (ocrRelationDescription.value
+    || sourceVersions.value.find((v) => v.version_kind === 'relation_desc')?.source_text
+    || '').trim(),
+)
+
+const showOcrTreePreview = ref(false)
+
+const familySourceImagePath = computed(() => ocrRawSourceVersion.value?.image_path || '')
+
+const familySourceImageUrl = computed(() =>
+  uploadImageUrl(familySourceImagePath.value, sourceImageDataUrl.value),
+)
+
 const sourceVersionBadge = computed(() => {
   if (sourceVersions.value.length && currentSourceVersion.value) {
     const v = currentSourceVersion.value
@@ -1500,6 +1508,12 @@ const digitizeSourceText = computed(() => {
   const v2 = ocrRelationDescription.value.trim()
   if (v2) return v2
   return ocrEditableText.value.trim()
+})
+
+const hasCurrentVersionText = computed(() => {
+  if (ocrVersionTab.value === 'v2') return Boolean(ocrRelationDescription.value.trim())
+  if (ocrVersionTab.value === 'v3') return Boolean(ocrCustomText.value.trim())
+  return Boolean(ocrEditableText.value.trim())
 })
 
 function familyInitial(f: { name?: string; surname?: string }) {
@@ -1559,49 +1573,80 @@ function relationTypeLabel(t: string, subtype?: string) {
   return base
 }
 
-// ==================== API 请求 ====================
+// ==================== 族谱操作 ====================
 
-const API_TIMEOUT = 15000
-const API_TIMEOUT_LONG = 300000 // OCR / 两阶段解析 / AI 整理
-
-async function api(method: string, path: string, data?: any, timeoutMs = API_TIMEOUT) {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
+async function refreshAgentPending() {
   try {
-    const res = await fetch(`${API}${path}`, {
-      method,
-      headers: { 'Content-Type': 'application/json' },
-      body: data ? JSON.stringify(data) : undefined,
-      signal: controller.signal,
-    })
-    const text = await res.text()
-    try {
-      const json = JSON.parse(text)
-      if (!res.ok && !json.message && !json.error) {
-        json.success = false
-        json.message = `HTTP ${res.status}`
-      }
-      return json
-    } catch {
-      return { success: false, message: res.ok ? '响应解析失败' : `HTTP ${res.status}: ${text.slice(0, 120)}` }
+    const res = await api('GET', '/agent/schedule')
+    if (res.success) {
+      agentPendingCount.value = res.pending_discoveries || 0
+      if (!agentPendingCount.value) agentReport.value = ''
     }
-  } catch (err: any) {
-    if (err?.name === 'AbortError') {
-      return { success: false, message: '请求超时，请确认后端已启动（backend 目录运行 python main.py）' }
-    }
-    return { success: false, message: '无法连接后端，请确认 backend 已启动' }
-  } finally {
-    clearTimeout(timer)
+  } catch {
+    /* ignore */
   }
 }
 
-const TEST_MIN_DISPLAY_MS = 2000
-
-function sleep(ms: number) {
-  return new Promise(resolve => setTimeout(resolve, ms))
+async function runAgentOnOpenScan() {
+  try {
+    const res = await api('POST', '/agent/genealogy-scan/on-open')
+    agentPendingCount.value = res.pending_discoveries ?? res.pending_total ?? agentPendingCount.value
+    if (res.success && !res.skipped && (res.discoveries_new || 0) > 0) {
+      agentReport.value = res.summary || `有 ${res.discoveries_new} 条新发现待确认`
+      showToast(agentReport.value, 'info')
+    }
+  } catch {
+    /* ignore */
+  }
 }
 
-// ==================== 鏃忚氨鎿嶄綔 ====================
+async function onDiscoveryRefresh(pending?: number) {
+  if (typeof pending === 'number') {
+    agentPendingCount.value = pending
+    if (!pending) agentReport.value = ''
+  } else {
+    await refreshAgentPending()
+  }
+}
+
+function openDiscoveriesGlobal() {
+  if (workspaceLayout.value === 'chat') {
+    chatDiscoveryOpen.value = true
+    return
+  }
+  if (currentFamily.value) {
+    showDiscoveryPanel.value = true
+  } else {
+    showToast('请先打开一份族谱', 'info')
+  }
+}
+
+function openSettingsMenu() {
+  showSettings.value = true
+}
+
+function onDiscoveryPlan(payload: { familyId: string; plan: unknown }) {
+  viewFamily(payload.familyId)
+  workspaceLayout.value = 'chat'
+  chatRequestedTab.value = 'organize'
+  agentReport.value = '已载入智能体整理方案，请在整理页确认'
+  nextTick(() => {
+    chatRequestedTab.value = 'organize'
+  })
+  void api('PUT', `/families/${payload.familyId}/ai-organize/state`, {
+    pending_plan: payload.plan,
+    apply_mode: 'merge',
+  })
+}
+
+async function onDiscoveryPlanClassic(payload: { familyId: string; plan: unknown }) {
+  if (currentFamily.value?.id !== payload.familyId) {
+    await viewFamily(payload.familyId)
+  }
+  pendingOrganizePlan.value = payload.plan as OrganizePlan
+  showDiscoveryPanel.value = false
+  openOrganizeInChat()
+}
 
 async function fetchFamilies() {
   loading.value = true
@@ -1641,9 +1686,15 @@ async function confirmDeleteFamily() {
     showToast('请输入正确的族谱名称以确认删除', 'error')
     return
   }
-  const res = await api('DELETE', `/families/${target.id}`)
-  if (res.success === false) {
-    showToast(res.message || res.detail || '删除失败', 'error')
+  try {
+    const res = await api('DELETE', `/families/${target.id}`)
+    if (res.success === false) {
+      showToast(res.message || res.detail || '删除失败', 'error')
+      return
+    }
+  } catch (e: unknown) {
+    const msg = (e as { message?: string })?.message
+    showToast(msg || '删除失败，请确认后端已启动', 'error')
     return
   }
   deleteFamilyModal.value = false
@@ -1679,19 +1730,101 @@ function leaveFamilyFromChat() {
   workspaceLayout.value = 'chat'
 }
 
-function enterClassicWorkspace(panel?: string) {
-  workspaceLayout.value = 'classic'
-  if (panel === 'organize' || panel === 'diff') {
-    showOrganizeDrawer.value = true
+function applyPersonDraftFromSession() {
+  const fid = currentFamily.value?.id
+  if (!fid) return
+  const raw = sessionStorage.getItem(`genealogy_person_draft_${fid}`)
+  if (!raw) return
+  try {
+    const parsed = JSON.parse(raw) as { personId?: string; draft?: Record<string, unknown> }
+    sessionStorage.removeItem(`genealogy_person_draft_${fid}`)
+    const personId = parsed.personId
+    const draft = parsed.draft || {}
+    if (!personId) return
+    const p = persons.value.find((x) => x.id === personId)
+    if (!p) return
+    selectedPersonId.value = personId
+    editingPerson.value = p
+    personForm.value = {
+      ...personForm.value,
+      name: (draft.name as string) || p.name || '',
+      gender: (draft.gender as string) || p.gender || 'unknown',
+      birth_year: (draft.birth_year as number) ?? p.birth_year ?? null,
+      death_year: (draft.death_year as number) ?? p.death_year ?? null,
+      generation: (draft.generation as number) ?? p.generation ?? null,
+      generation_name: (draft.generation_name as string) || p.generation_name || '',
+      courtesy_name: (draft.courtesy_name as string) || p.courtesy_name || '',
+      art_name: (draft.art_name as string) || p.art_name || '',
+      county: (draft.county as string) || p.county || '',
+      town: (draft.town as string) || p.town || '',
+      village: (draft.village as string) || p.village || '',
+      biography: (draft.biography as string) || p.biography || '',
+      parent_id: p.parent_id || '',
+      spouse_id: p.spouse_id || '',
+      review_status: p.review_status || 'confirmed',
+    }
+    showPersonModal.value = true
+    showToast('对话提取的资料已预填，请核对后保存', 'success')
+  } catch {
+    /* ignore */
   }
+}
+
+function openSourceDrawer() {
+  showTextImportDrawer.value = true
+  if (familySourceImagePath.value || sourceImageDataUrl.value) {
+    selectClassicSourceTab('v1')
+  }
+}
+
+function enterClassicWorkspace(panel?: string) {
+  if (panel === 'organize') {
+    openOrganizeInChat()
+    return
+  }
+  workspaceLayout.value = 'classic'
+  showMobileToolbarMenu.value = false
+  if (panel === 'source') {
+    openSourceDrawer()
+  } else if (panel === 'export') showExportDrawer.value = true
+  else if (panel === 'search') showSearchDrawer.value = true
+  else if (panel === 'diff') void rebuildFamily()
+  else if (panel === 'person') applyPersonDraftFromSession()
   nextTick(() => fitTreeToView())
 }
 
-async function onChatShellRefresh() {
+function openOrganizeInChat() {
+  workspaceLayout.value = 'chat'
+  chatRequestedTab.value = null
+  if (currentFamily.value?.id) void loadOrganizeState(currentFamily.value.id)
+  nextTick(() => {
+    chatRequestedTab.value = 'organize'
+  })
+}
+
+function openOrganizeFromMerge() {
+  showMergeDrawer.value = false
+  openOrganizeInChat()
+}
+
+async function onMergeSaved() {
+  if (!currentFamily.value?.id) return
+  await fetchPersons()
+  await fetchRelations()
+}
+
+async function onChatShellRefresh(pending?: number) {
+  if (typeof pending === 'number') {
+    agentPendingCount.value = pending
+    if (!pending) agentReport.value = ''
+  } else {
+    await refreshAgentPending()
+  }
   await fetchFamilies()
   if (currentFamily.value?.id) {
     await fetchPersons()
     await fetchRelations()
+    await loadOrganizeState(currentFamily.value.id)
   }
 }
 
@@ -1972,6 +2105,7 @@ function openAddPerson() {
 function goOCRFromFamily() {
   const fid = currentFamily.value?.id
   goOCR()
+  showOcrTreePreview.value = false
   if (fid) {
     ocrFamilyId.value = fid
     ocrStep.value = 'upload'
@@ -2041,8 +2175,11 @@ async function viewFamily(id: string) {
   await fetchSourceVersions()
   await syncPersonDetailsFromSourceQuiet()
   await loadOrganizeState(id)
-  if (!isMobileViewport() && (currentFamily.value.source_text || sourceVersions.value.length)) {
+  const v1Img = sourceVersions.value.find((v) => v.version_kind === 'ocr_raw')?.image_path
+  const hasSource = currentFamily.value.source_text || sourceVersions.value.length || v1Img
+  if (!isMobileViewport() && hasSource) {
     showTextImportDrawer.value = true
+    if (v1Img) selectClassicSourceTab('v1')
   } else {
     showTextImportDrawer.value = false
   }
@@ -2068,23 +2205,25 @@ function initCustomFromV2() {
     return
   }
   ocrCustomText.value = ocrRelationDescription.value
-  ocrVersionTab.value = 'v3'
+  selectClassicSourceTab('v3')
   showToast('已从版本二复制到修正稿', 'success')
 }
 
 async function regenerateOcrV2() {
-  if (!ocrEditableText.value.trim()) return
+  const fid = currentFamily.value?.id || ocrFamilyId.value
+  if (!fid || !ocrEditableText.value.trim()) return
   ocrRegeneratingV2.value = true
   try {
-    const res = await api('POST', `/families/${ocrFamilyId.value}/source-versions/regenerate-relation-desc`, {
+    const res = await api('POST', `/families/${fid}/source-versions/regenerate-relation-desc`, {
       ocr_text: ocrEditableText.value,
-      parse: parseConfig.value,
     }, API_TIMEOUT_LONG)
     if (!res.success) {
       showToast(res.detail || res.message || '生成失败', 'error')
       return
     }
     ocrRelationDescription.value = res.relation_description || ''
+    if (res.versions) sourceVersions.value = res.versions
+    else await fetchSourceVersions()
     ocrVersionTab.value = 'v2'
     showToast('版本二关系描述已重新生成', 'success')
   } catch (e: any) {
@@ -2097,10 +2236,21 @@ async function regenerateOcrV2() {
 async function compareSourceVersions() {
   const fid = currentFamily.value?.id
   if (!fid || sourceVersions.value.length < 2) return
+  const v1 = sourceVersions.value.find((v) => v.version_kind === 'ocr_raw')
   const v2 = sourceVersions.value.find((v) => v.version_kind === 'relation_desc')
   const v3 = sourceVersions.value.find((v) => v.version_kind === 'custom')
-  const fromId = v2?.id || sourceVersions.value[0]?.id
-  const toId = v3?.id || sourceVersions.value[sourceVersions.value.length - 1]?.id
+  let fromId: string | undefined
+  let toId: string | undefined
+  if (isCustomSourceVersion.value) {
+    fromId = v2?.id
+    toId = v3?.id || currentSourceVersionId.value || undefined
+  } else if (isRelationDescSourceVersion.value) {
+    fromId = v1?.id
+    toId = v2?.id || currentSourceVersionId.value || undefined
+  } else {
+    fromId = v1?.id || sourceVersions.value[0]?.id
+    toId = v2?.id || sourceVersions.value[sourceVersions.value.length - 1]?.id
+  }
   if (!fromId || !toId || fromId === toId) {
     showToast('需要至少两个不同版本才能对比', 'info')
     return
@@ -2112,6 +2262,149 @@ async function compareSourceVersions() {
   }
   sourceVersionDiff.value = res.diff
   showToast(res.diff?.summary || '对比完成', 'info')
+}
+
+function syncPipelineVersionsFromList(versions: any[]) {
+  const v1 = versions.find((v) => v.version_kind === 'ocr_raw')
+  const v2 = versions.find((v) => v.version_kind === 'relation_desc')
+  const v3 = versions.find((v) => v.version_kind === 'custom')
+  if (v1) {
+    ocrEditableText.value = v1.source_text || ''
+    ocrParsedBaseline.value = v1.source_text || ''
+    try {
+      const raw = v1.source_annotations
+      if (!raw) ocrAnnotations.value = []
+      else if (typeof raw === 'string') ocrAnnotations.value = JSON.parse(raw)
+      else ocrAnnotations.value = raw
+    } catch {
+      ocrAnnotations.value = []
+    }
+  }
+  if (v2) ocrRelationDescription.value = v2.source_text || ''
+  if (v3) ocrCustomText.value = v3.source_text || ''
+}
+
+function selectClassicSourceTab(tab: 'v1' | 'v2' | 'v3') {
+  ocrVersionTab.value = tab
+  const kind = tab === 'v1' ? 'ocr_raw' : tab === 'v2' ? 'relation_desc' : 'custom'
+  const v = sourceVersions.value.find((x) => x.version_kind === kind)
+  if (v) {
+    currentSourceVersionId.value = v.id
+    lastSourceVersionId.value = v.id
+  }
+}
+
+function insertRelationTextTemplate() {
+  if (ocrRelationDescription.value.trim()) {
+    if (!confirm('版本二已有内容，用样板覆盖？')) return
+  }
+  ocrRelationDescription.value = RELATION_TEXT_FORMAT_TEMPLATE
+  ocrVersionTab.value = 'v2'
+  selectClassicSourceTab('v2')
+  showToast('已插入关系描述样板，请按您的族谱修改', 'success')
+}
+
+async function imageUrlToBase64(url: string): Promise<string> {
+  const res = await fetch(url)
+  const blob = await res.blob()
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const data = (reader.result as string) || ''
+      resolve(data.split(',')[1] || '')
+    }
+    reader.onerror = reject
+    reader.readAsDataURL(blob)
+  })
+}
+
+async function regenerateOcrV1FromImage() {
+  const fid = currentFamily.value?.id
+  if (!fid) return
+  let base64 = ''
+  if (sourceImageDataUrl.value) {
+    base64 = sourceImageDataUrl.value.split(',')[1] || ''
+  } else if (familySourceImageUrl.value) {
+    try {
+      base64 = await imageUrlToBase64(familySourceImageUrl.value)
+    } catch {
+      showToast('读取原图失败', 'error')
+      return
+    }
+  }
+  if (!base64) {
+    showToast('请先添加或保存原文扫描图', 'info')
+    return
+  }
+  ocrRegeneratingV1.value = true
+  try {
+    const ocrRes = await api('POST', '/agent/scan-ocr', { image: base64 }, API_TIMEOUT_LONG)
+    if (!ocrRes.success) {
+      showToast(ocrRes.error || ocrRes.message || 'OCR 识别失败', 'error')
+      return
+    }
+    ocrEditableText.value = ocrRes.text || ''
+    ocrParsedBaseline.value = ocrRes.text || ''
+    ocrAnnotations.value = []
+    ocrVersionTab.value = 'v1'
+    selectClassicSourceTab('v1')
+    await autoExtractOcrNames()
+    showToast('版本一 OCR 原文已重新识别', 'success')
+  } catch (e: any) {
+    showToast(e?.message || '重新识别失败', 'error')
+  } finally {
+    ocrRegeneratingV1.value = false
+  }
+}
+
+async function generateGenealogyFromActiveVersion() {
+  const fid = currentFamily.value?.id
+  if (!fid) return
+  ocrReparsing.value = true
+  textParseFailedHint.value = ''
+  try {
+    const tab = ocrVersionTab.value
+    let parsed
+    if (tab === 'v1') {
+      const raw = ocrEditableText.value.trim()
+      if (!raw) {
+        showToast('版本一暂无内容', 'info')
+        return
+      }
+      parsed = await parseTextContent(raw)
+    } else if (tab === 'v2') {
+      const rel = ocrRelationDescription.value.trim()
+      const raw = ocrRawBaselineText.value
+      if (!rel) {
+        showToast('版本二暂无内容，可点「从版本一重新生成」或插入样板', 'info')
+        return
+      }
+      parsed = await parseTextContent(rel, { relationText: rel, rawText: raw })
+    } else {
+      const rel = (ocrCustomText.value.trim() || ocrRelationDescription.value.trim())
+      const raw = ocrRawBaselineText.value
+      if (!rel) {
+        showToast('版本三暂无内容', 'info')
+        return
+      }
+      parsed = await parseTextContent(rel, { relationText: rel, rawText: raw })
+    }
+    applyParseResult(parsed)
+    if (parsed.warning) showToast(parsed.warning, 'error')
+    const personCount = parsed.persons?.length || 0
+    if (!personCount) {
+      textParseFailedHint.value = '未能从当前版本解析出成员。请对照下方「关系描述格式样板」整理版本二/三。'
+      showToast('解析未得到成员', 'error')
+      return
+    }
+    const compare = await previewParseImportDiff(fid, parsed.persons, parsed.relations)
+    openParseImportCompare(fid, compare, parsed.persons, parsed.relations)
+  } catch (e: any) {
+    textParseFailedHint.value = '解析失败，请检查关系描述格式或改用 AI 整理'
+    showToast(e?.message || '解析失败', 'error')
+  } finally {
+    ocrReparsing.value = false
+  }
 }
 
 function applySourceVersionToEditor(version: any) {
@@ -2155,6 +2448,15 @@ async function fetchSourceVersions() {
     if (current) {
       applySourceVersionToEditor(current)
     }
+    syncPipelineVersionsFromList(sourceVersions.value)
+    const v1 = sourceVersions.value.find((x) => x.version_kind === 'ocr_raw')
+    const kind = current?.version_kind
+    if (kind === 'relation_desc' && !v1?.image_path) ocrVersionTab.value = 'v2'
+    else if (kind === 'custom' && !v1?.image_path) ocrVersionTab.value = 'v3'
+    else if (v1?.image_path) ocrVersionTab.value = 'v1'
+    else if (kind === 'relation_desc') ocrVersionTab.value = 'v2'
+    else if (kind === 'custom') ocrVersionTab.value = 'v3'
+    else ocrVersionTab.value = 'v1'
   } catch {
     sourceVersions.value = []
   }
@@ -2168,6 +2470,7 @@ function onSourceVersionSelect() {
     currentSourceVersionId.value = lastSourceVersionId.value
     return
   }
+  sourceImageDataUrl.value = ''
   applySourceVersionToEditor(next)
   lastSourceVersionId.value = nextId
 }
@@ -2261,20 +2564,91 @@ function loadFamilySourceFromDetail(family: any) {
   }
 }
 
+function onEditorSourceImageUpload(file: File) {
+  void loadSourceImagePreview(file)
+}
+
+function onSourceImageFileSelect(e: Event) {
+  const file = (e.target as HTMLInputElement).files?.[0]
+  if (file) void loadSourceImagePreview(file)
+  if (sourceImageInputRef.value) sourceImageInputRef.value.value = ''
+}
+
+async function loadSourceImagePreview(file: File) {
+  try {
+    const compressed = await compressImageFile(file)
+    const reader = new FileReader()
+    reader.onload = (ev) => {
+      sourceImageDataUrl.value = (ev.target?.result as string) || ''
+      showToast('原图已载入，请点击「保存原图」写入族谱', 'info')
+    }
+    reader.readAsDataURL(compressed)
+  } catch {
+    showToast('图片读取失败，请换一张 JPG/PNG 试试', 'error')
+  }
+}
+
+async function saveFamilySourceImage() {
+  const fid = currentFamily.value?.id
+  if (!fid || !sourceImageDataUrl.value) return
+  const b64 = sourceImageDataUrl.value.split(',')[1]
+  if (!b64) {
+    showToast('图片数据无效', 'error')
+    return
+  }
+  sourceImageSaving.value = true
+  try {
+    const res = await api('POST', `/families/${fid}/source-image`, { image_base64: b64 })
+    if (!res.success) {
+      showToast(res.detail || res.message || '保存原图失败', 'error')
+      return
+    }
+    if (res.version) {
+      const idx = sourceVersions.value.findIndex((v) => v.id === res.version.id)
+      if (idx >= 0) sourceVersions.value[idx] = res.version
+      else sourceVersions.value = [...sourceVersions.value, res.version]
+    } else {
+      await fetchSourceVersions()
+    }
+    sourceImageDataUrl.value = ''
+    showToast('原文扫描图已保存到族谱', 'success')
+  } catch (e: any) {
+    showToast(e?.message || '保存原图失败', 'error')
+  } finally {
+    sourceImageSaving.value = false
+  }
+}
+
 async function saveFamilySourceText() {
   const fid = currentFamily.value?.id
   if (!fid) return
+  let sourceText = ocrEditableText.value
+  let sourceAnnotations: NameAnnotation[] = ocrAnnotations.value
+  const tab = ocrVersionTab.value
+  if (tab === 'v2') {
+    sourceText = ocrRelationDescription.value
+    sourceAnnotations = []
+  } else if (tab === 'v3') {
+    sourceText = ocrCustomText.value
+    sourceAnnotations = []
+  }
+  const kind = tab === 'v1' ? 'ocr_raw' : tab === 'v2' ? 'relation_desc' : 'custom'
+  const versionByKind = sourceVersions.value.find((v) => v.version_kind === kind)
+  if (sourceImageDataUrl.value && tab === 'v1') {
+    await saveFamilySourceImage()
+  }
   let res
-  if (currentSourceVersionId.value) {
-    res = await api('PUT', `/families/${fid}/source-versions/${currentSourceVersionId.value}`, {
-      source_text: ocrEditableText.value,
-      source_annotations: ocrAnnotations.value,
+  const targetVid = versionByKind?.id || currentSourceVersionId.value
+  if (targetVid) {
+    res = await api('PUT', `/families/${fid}/source-versions/${targetVid}`, {
+      source_text: sourceText,
+      source_annotations: sourceAnnotations,
     })
   } else {
     res = await api('PUT', `/families/${fid}/source-text`, {
-      source_text: ocrEditableText.value,
-      source_annotations: ocrAnnotations.value,
-      origin: 'manual',
+      source_text: sourceText,
+      source_annotations: sourceAnnotations,
+      origin: tab === 'v1' ? 'manual' : 'manual',
     })
   }
   if (res.success) {
@@ -2289,8 +2663,9 @@ async function saveFamilySourceText() {
     } else {
       await fetchSourceVersions()
     }
-    ocrParsedBaseline.value = ocrEditableText.value
+    if (isOcrRawSourceVersion.value) ocrParsedBaseline.value = sourceText
     familySourceDirty.value = false
+    if (res.version?.image_path) sourceImageDataUrl.value = ''
     showToast('原文已保存', 'success')
     await syncPersonDetailsFromSourceQuiet()
   } else {
@@ -2303,7 +2678,6 @@ async function parseTextContent(text: string, opts?: { relationText?: string; ra
     text: opts?.rawText || text,
     relation_text: opts?.relationText || undefined,
     skip_describe: Boolean(opts?.relationText),
-    parse: parseConfig.value,
   }, API_TIMEOUT_LONG)
   if (res.success === false) {
     throw new Error(res.error || res.detail || '解析失败')
@@ -2432,8 +2806,8 @@ async function applyTextParseToFamily() {
     }
 
     if (personCount === 0) {
-      textParseFailedHint.value = '自动解析未识别到成员。您已梳理的原文已保存，可直接用 AI 对话整理继续建谱。'
-      showToast('解析未得到成员，请改用 AI 对话整理', 'error')
+      textParseFailedHint.value = '自动解析未识别到成员。原文已保存，请打开「整理组谱」继续。'
+      showToast('解析未得到成员，请改用整理组谱', 'error')
       return
     }
 
@@ -2446,7 +2820,7 @@ async function applyTextParseToFamily() {
     openParseImportCompare(currentFamily.value.id, compare, parsed.persons, parsed.relations)
     ocrParsedBaseline.value = ocrEditableText.value
   } catch (e: any) {
-    textParseFailedHint.value = '自动解析失败，但原文仍可保存。请点「改用 AI 对话整理」继续。'
+    textParseFailedHint.value = '自动解析失败，但原文仍可保存。请点「打开整理组谱」继续。'
     try {
       await api('PUT', `/families/${currentFamily.value!.id}/source-text`, {
         source_text: ocrEditableText.value,
@@ -2455,7 +2829,7 @@ async function applyTextParseToFamily() {
     } catch {
       /* ignore save error in fallback path */
     }
-    showToast((e.message || '解析失败') + '，可改用 AI 对话整理', 'error')
+    showToast((e.message || '解析失败') + '，可改用整理组谱', 'error')
   } finally {
     ocrReparsing.value = false
   }
@@ -2958,7 +3332,7 @@ function goOCR() {
   showOCR.value = true
   currentFamily.value = null
   ocrStep.value = 'select'
-  previewImage.value = ''
+  clearOcrUpload()
   ocrResult.value = { text: '' }
   ocrEditableText.value = ''
   ocrParsedBaseline.value = ''
@@ -2966,6 +3340,7 @@ function goOCR() {
   ocrRelationDescription.value = ''
   ocrCustomText.value = ''
   ocrVersionTab.value = 'v1'
+  showOcrTreePreview.value = false
   ocrDescribingV2.value = false
   ocrParseSteps.value = []
   parsedPersons.value = []
@@ -2979,19 +3354,66 @@ function selectFamilyForOCR(f: any) {
   ocrStep.value = 'upload'
 }
 
+function clearOcrUpload() {
+  previewImage.value = ''
+  ocrScanImagePath.value = ''
+  ocrScanPdfPath.value = ''
+  ocrUploadKind.value = 'image'
+  ocrPdfBase64.value = ''
+  ocrPdfInfo.value = null
+  if (fileInput.value) fileInput.value.value = ''
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = (ev) => resolve(String(ev.target?.result || ''))
+    reader.onerror = () => reject(new Error('文件读取失败'))
+    reader.readAsDataURL(file)
+  })
+}
+
 function handleImageSelect(e: Event) {
   const file = (e.target as HTMLInputElement).files?.[0]
   if (!file) return
+  void (async () => {
+    try {
+      const isPdf = file.type === 'application/pdf' || /\.pdf$/i.test(file.name)
+      if (isPdf) {
+        const dataUrl = await readFileAsDataUrl(file)
+        const base64 = dataUrl.split(',')[1] || ''
+        if (!base64) {
+          showToast('PDF 读取失败', 'error')
+          return
+        }
+        const info = await api('POST', '/agent/pdf/info', { pdf: base64 })
+        if (!info.success) {
+          showToast(info.detail || info.error || 'PDF 解析失败', 'error')
+          return
+        }
+        ocrUploadKind.value = 'pdf'
+        ocrPdfBase64.value = base64
+        ocrPdfInfo.value = { page_count: info.page_count, title: info.title }
+        previewImage.value = ''
+        ocrScanImagePath.value = ''
+        showToast(`已选择 PDF，共 ${info.page_count} 页`, 'success')
+        return
+      }
 
-  const reader = new FileReader()
-  reader.onload = (e) => {
-    previewImage.value = e.target?.result as string
-  }
-  reader.readAsDataURL(file)
+      ocrUploadKind.value = 'image'
+      ocrPdfBase64.value = ''
+      ocrPdfInfo.value = null
+      const compressed = await compressImageFile(file)
+      previewImage.value = await readFileAsDataUrl(compressed)
+    } catch (err: any) {
+      showToast(err?.message || '文件读取失败，请换 JPG/PNG/PDF 试试', 'error')
+    }
+  })()
 }
 
 async function doOCR() {
-  if (!previewImage.value) return
+  const isPdf = ocrUploadKind.value === 'pdf' && !!ocrPdfBase64.value
+  if (!isPdf && !previewImage.value) return
   ocrLoading.value = true
   ocrDescribingV2.value = false
   scanValidation.value = null
@@ -3005,29 +3427,46 @@ async function doOCR() {
   treePreviewNodes.value = []
 
   try {
-    const base64 = previewImage.value.split(',')[1]
-
-    const ocrRes = await api('POST', '/agent/scan-ocr', {
-      image: base64,
-      ocr: ocrConfig.value,
-    }, API_TIMEOUT_LONG)
+    let ocrRes: any
+    if (isPdf) {
+      ocrRes = await api('POST', '/agent/pdf/scan-ocr', { pdf: ocrPdfBase64.value })
+    } else {
+      const base64 = previewImage.value.split(',')[1]
+      ocrRes = await api('POST', '/agent/scan-ocr', { image: base64 }, API_TIMEOUT_LONG)
+    }
 
     if (!ocrRes.success) {
       alert(ocrRes.error || ocrRes.message || '文字识别失败')
       return
     }
 
+    if (ocrRes.preview_image_base64) {
+      previewImage.value = `data:image/jpeg;base64,${ocrRes.preview_image_base64}`
+    }
+
     ocrResult.value = {
       text: ocrRes.text,
       provider: ocrRes.ocr?.provider,
       model: ocrRes.ocr?.model,
+      page_count: ocrRes.page_count,
+      pages_recognized: ocrRes.pages_recognized,
     }
     ocrEditableText.value = ocrRes.text || ''
     ocrParsedBaseline.value = ocrRes.text || ''
+    ocrScanImagePath.value = ocrRes.image_path || ''
+    ocrScanPdfPath.value = ocrRes.pdf_path || ''
     ocrAnnotations.value = []
     ocrStep.value = 'result'
     ocrVersionTab.value = 'v1'
     ocrLoading.value = false
+
+    if (isPdf && ocrRes.page_count) {
+      const ok = ocrRes.pages_recognized ?? ocrRes.page_count
+      const warn = Array.isArray(ocrRes.page_errors) && ocrRes.page_errors.length
+        ? `（${ocrRes.page_errors.length} 页识别异常）`
+        : ''
+      showToast(`PDF 识别完成：${ok}/${ocrRes.page_count} 页有文字${warn}`, warn ? 'error' : 'success')
+    }
 
     if (ocrRes.text) {
       autoExtractOcrNames()
@@ -3214,26 +3653,8 @@ function saveParsedEdit() {
   parsedEditIndex.value = null
 }
 
-async function openAiOrganize(options?: { bootstrap?: boolean }) {
-  await fetchAISettings()
-  if (currentFamily.value?.id && !activeSourceText.value) {
-    await fetchSourceVersions()
-  }
-  aiOrganizeBootstrap.value = Boolean(options?.bootstrap)
-  if (options?.bootstrap) {
-    organizeCleanSlate.value = true
-    showOrganizeDrawer.value = true
-  }
-  aiOrganizeInitialPrompt.value = options?.bootstrap
-    ? '请根据附带的族谱原文，干净整理出完整主谱：提取所有人物、世代与父子/配偶关系，给出可应用的整理方案。'
-    : ''
-  showAiOrganize.value = true
-}
-
-function closeAiOrganize() {
-  showAiOrganize.value = false
-  aiOrganizeInitialPrompt.value = ''
-  aiOrganizeBootstrap.value = false
+async function openSmartOrganize() {
+  openOrganizeInChat()
 }
 
 async function loadOrganizeState(familyId: string) {
@@ -3302,11 +3723,6 @@ function onOrganizePlanEdited() {
 function onAiPlanUpdate(payload: { plan: OrganizePlan | null; diff: OrganizeDiff | null }) {
   pendingOrganizePlan.value = payload.plan
   pendingOrganizeDiff.value = payload.diff
-  if (payload.plan && planHasChanges(payload.plan)) {
-    organizeApplyMode.value = pickDefaultApplyMode(payload, { memberCount: persons.value.length })
-    showOrganizeDrawer.value = true
-    showToast('AI 方案已同步到「族谱整理」面板', 'success')
-  }
   void saveOrganizeState()
 }
 
@@ -3338,11 +3754,6 @@ async function onOrganizeApplied(stats?: Record<string, number>) {
   showToast(msg, 'success')
 }
 
-watch(showOrganizeDrawer, (open) => {
-  if (open && pendingOrganizePlan.value && planHasChanges(pendingOrganizePlan.value)) {
-    void refreshOrganizeDiff()
-  }
-})
 
 async function onOrganizeCleared() {
   selectedPersonId.value = null
@@ -3353,8 +3764,7 @@ async function onOrganizeCleared() {
   await loadTree()
   if (pendingOrganizePlan.value && planHasChanges(pendingOrganizePlan.value)) {
     await refreshOrganizeDiff()
-    showOrganizeDrawer.value = true
-    showToast('主谱已清空，可点「替换写入主谱」直接写入 AI 方案', 'success')
+    showToast('主谱已清空，可点「替换写入主谱」直接写入方案', 'success')
   } else {
     showToast('主谱已清空，可从原文或 AI 方案重建', 'success')
   }
@@ -3512,6 +3922,8 @@ async function saveParsedPersons() {
     relation_description: ocrRelationDescription.value,
     custom_text: ocrCustomText.value,
     source_annotations: ocrAnnotations.value,
+    image_path: ocrScanImagePath.value || undefined,
+    pdf_path: ocrScanPdfPath.value || undefined,
     active_kind: activeKind,
   })
 
@@ -3592,138 +4004,18 @@ function getNodeY(id: string) {
   return 80 + Math.floor(idx / 4) * 100
 }
 
-// ==================== AI 璁剧疆 ====================
-
-async function fetchAISettings() {
-  try {
-    const res = await api('GET', '/ai/config')
-    if (res.ocr) ocrConfig.value = { ...ocrConfig.value, ...res.ocr }
-    if (res.parse) parseConfig.value = { ...parseConfig.value, ...res.parse }
-    if (res.keys) {
-      for (const [pid, info] of Object.entries(res.keys as Record<string, any>)) {
-        if (!providerKeys.value[pid]) {
-          providerKeys.value[pid] = { api_key: '', api_base: info.api_base || '', group_id: '', configured: false }
-        }
-        providerKeys.value[pid].configured = info.configured
-        if (info.api_base) providerKeys.value[pid].api_base = info.api_base
-        if (info.group_id) providerKeys.value[pid].group_id = info.group_id
-      }
-    }
-  } catch {}
-}
-
-function buildTestPayload(task: 'key' | 'ocr' | 'parse') {
-  const payload: Record<string, string> = { task }
-  if (task === 'key') {
-    payload.provider = keyTab.value
-    if (keyTab.value === 'minimax') {
-      payload.model = 'MiniMax-M2.7'
-    } else {
-      const p = providers.value.find(item => item.id === keyTab.value)
-      payload.model = p?.text_models?.[0] || p?.text_model || parseConfig.value.model
-    }
-  } else if (task === 'ocr') {
-    payload.provider = ocrConfig.value.provider
-    payload.model = ocrConfig.value.model
-  } else {
-    payload.provider = parseConfig.value.provider
-    payload.model = parseConfig.value.model
-  }
-  const pk = providerKeys.value[payload.provider]
-  if (pk?.api_key) payload.api_key = pk.api_key
-  if (pk?.group_id) payload.group_id = pk.group_id
-  if (payload.provider === 'custom' && pk?.api_base) payload.api_base = pk.api_base
-  return payload
-}
-
-async function applyTestResult(
-  task: 'key' | 'ocr' | 'parse',
-  startedAt: number,
-  result: { ok: boolean; message: string; preview?: string; latency?: number },
-) {
-  const elapsed = Date.now() - startedAt
-  if (elapsed < TEST_MIN_DISPLAY_MS) {
-    await sleep(TEST_MIN_DISPLAY_MS - elapsed)
-  }
-  testStatus.value[task] = {
-    loading: false,
-    ok: result.ok,
-    message: result.message,
-    preview: result.preview || '',
-    latency: result.latency || 0,
-  }
-}
-
-async function testAIModel(task: 'key' | 'ocr' | 'parse') {
-  const startedAt = Date.now()
-  testStatus.value[task] = { ...emptyTest(), loading: true, message: '连接中…' }
-
-  if (task === 'key' && keyTab.value === 'minimax') {
-    const pk = providerKeys.value.minimax
-    // 宸蹭繚瀛樿繃閰嶇疆鍒欒蛋鍚庣璇诲簱锛涘惁鍒欒姹傝〃鍗曢噷宸插～
-    if (!pk?.configured) {
-      if (!pk?.api_key?.trim()) {
-        await applyTestResult(task, startedAt, { ok: false, message: '请先填写 API Key' })
-        return
-      }
-      if (!pk?.group_id?.trim()) {
-        await applyTestResult(task, startedAt, {
-          ok: false,
-          message: '请先填写 Group ID（MiniMax 控制台 → 基础信息）',
-        })
-        return
-      }
-    }
-  }
-
-  try {
-    const res = await api('POST', '/ai/test', buildTestPayload(task))
-    await applyTestResult(task, startedAt, {
-      ok: !!res.success,
-      message: res.message || res.error || (res.success ? '连接成功，模型有回应' : '测试失败'),
-      preview: res.reply_preview || '',
-      latency: res.latency_ms || 0,
-    })
-  } catch (e: any) {
-    await applyTestResult(task, startedAt, {
-      ok: false,
-      message: e?.message || '请求失败，请确认后端已启动（端口 8080）',
-    })
-  }
-}
-
-async function saveAISettings() {
-  const keys: Record<string, { api_key?: string; api_base?: string; group_id?: string }> = {}
-  for (const [pid, val] of Object.entries(providerKeys.value)) {
-    const entry: { api_key?: string; api_base?: string; group_id?: string } = {}
-    if (val.api_key) entry.api_key = val.api_key
-    if (pid === 'custom' && val.api_base) entry.api_base = val.api_base
-    if (pid === 'minimax' && val.group_id) entry.group_id = val.group_id
-    if (Object.keys(entry).length) keys[pid] = entry
-  }
-  // MiniMax锛欸roup ID 蹇呭～锛屼繚瀛樻椂濮嬬粓鎻愪氦
-  const mm = providerKeys.value.minimax
-  if (mm) {
-    keys.minimax = { ...(keys.minimax || {}), group_id: mm.group_id || '' }
-  }
-  await api('POST', '/ai/config', {
-    keys,
-    ocr: ocrConfig.value,
-    parse: parseConfig.value,
-  })
-  showSettings.value = false
-  alert('AI 配置已保存')
-  await fetchAISettings()
-}
-
 watch(showTextImportDrawer, (open) => {
   if (!open) nextTick(() => fitTreeToView())
 })
 
 onMounted(async () => {
-  fetchFamilies()
-  await fetchProviders()
-  await fetchAISettings()
+  const health = await pingBackend()
+  if (!health.ok) {
+    showToast(health.message || '后端未响应，请在 backend 目录运行 python main.py', 'error')
+  }
+  await fetchFamilies()
+  await refreshAgentPending()
+  void runAgentOnOpenScan()
 })
 
 onUnmounted(() => {

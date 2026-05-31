@@ -187,7 +187,20 @@ defineExpose({
 </script>
 
 <template>
+  <div v-if="mode === 'graph'" class="ref-graph-host">
+    <GenealogyReferenceView
+      :mode="mode"
+      :persons="persons"
+      :relations="relations"
+      :structured-text="structuredText"
+      :title="title"
+      :selected-person-id="selectedPersonId"
+      fill
+      @select="emit('select', $event)"
+    />
+  </div>
   <div
+    v-else
     ref="viewportRef"
     class="ref-zoom-viewport"
     :class="{ panning: isPanning }"

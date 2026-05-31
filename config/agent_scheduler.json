@@ -1,0 +1,14 @@
+{
+  "$schema": "./agent_scheduler.schema.json",
+  "version": "1.0",
+  "description": "族谱智能体定时整理与跨库对照默认配置",
+  "enabled": true,
+  "daily_run_times": ["08:00", "20:00"],
+  "on_open_max_hours": 48,
+  "check_interval_minutes": 5,
+  "compare_owned_families": true,
+  "compare_followed_families": true,
+  "compare_snapshots": true,
+  "min_match_confidence": 0.62,
+  "max_discoveries_per_scan": 50
+}

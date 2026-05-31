@@ -1,5 +1,14 @@
 """族谱 OCR → 关系描述 → 数字化 两阶段提示词。"""
 
+from agent.pipeline_config import format_forbidden_for_prompt, format_rules_for_prompt, get_relation_format
+
+_fmt = get_relation_format()
+_LINE_EXAMPLE = _fmt.get("recommended_line_example") or (
+    "一世 张公 男 字德明 生1920 配李氏 子张三,张四"
+)
+_FORBIDDEN = format_forbidden_for_prompt()
+_EXTRA_RULES = format_rules_for_prompt()
+
 OCR_PROMPT = """你是族谱 OCR 专家。这是【版本一：OCR 原文识别】——把图片中的文字忠实转写为可编辑原文。
 
 要求：
@@ -14,7 +23,7 @@ OCR_PROMPT = """你是族谱 OCR 专家。这是【版本一：OCR 原文识别�
 6. 不要整理关系、不要改写成描述稿、不要 JSON——只输出识别到的原文文字。"""
 
 # 第二阶段：版本一 OCR 原文 → 版本二「关系描述稿」（供数字化组谱）
-RELATION_DESCRIBE_PROMPT_TEMPLATE = """你是族谱整理与数字化专家。用户已完成【版本一：OCR 原文识别】。你的任务是生成【版本二：关系描述稿】——把 OCR 乱序、缺行的原文整理成「数字族谱系统可直接解析」的结构化文字。
+RELATION_DESCRIBE_PROMPT_TEMPLATE = f"""你是族谱整理与数字化专家。用户已完成【版本一：OCR 原文识别】。你的任务是生成【版本二：关系描述稿】——把 OCR 乱序、缺行的原文整理成「数字族谱系统可直接解析」的结构化文字。
 
 【版本二的目标】
 - 每一行对应一个真实人物，或一行写清「某人 + 配偶 + 子女列表」；
@@ -25,38 +34,32 @@ RELATION_DESCRIBE_PROMPT_TEMPLATE = """你是族谱整理与数字化专家。�
 
 【禁止】
 - 不要 JSON、不要 markdown 代码块、不要「说明」「总结」类段落；
-- 不要把「一世」「谱序」「碑记」「长子」「次子」单独当作人名（可作行首世代标记）。
+- 不要把 {_FORBIDDEN} 单独当作人名（可作行首世代标记）。
+
+【格式规则（见 config/genealogy_pipeline.json）】
+{_EXTRA_RULES or "- 每行一人；父子配偶关系必须在文字中可读"}
 
 【推荐行格式】
-{{世代}} {{姓名}} [男|女] [字xxx] [生YYYY] [卒YYYY] [配配偶名] [子:名1,名2] [女:名1]
-
-【示例：版本一 OCR 输入】
-张氏族谱
-一世
-张公 字德明 生一九二零
-配李氏
-子 张三 张四
-二世
-张三 生一九五零 配王氏 子张甲
+{{{{世代}}}} {{{{姓名}}}} [男|女] [字xxx] [生YYYY] [卒YYYY] [配配偶名] [子:名1,名2] [女:名1]
 
 【示例：版本二 关系描述稿输出】
-一世 张公 男 字德明 生1920 配李氏 子张三,张四
+{_LINE_EXAMPLE}
 二世 张三 男 生1950 配王氏 子张甲
 二世 张四 男
 一世 李氏 女 配张公
 二世 王氏 女 配张三
 
 【版本一 · OCR 原文】
-{raw_text}
+{{raw_text}}
 
 请直接输出【版本二 · 关系描述稿】全文："""
 
 # 第二阶段：关系描述稿 → 数字化 JSON（人物 + 关系）
-DIGITIZE_PROMPT_TEMPLATE = """你是族谱数字化专家。这是族谱组谱的【第二步】：根据「关系描述稿」提取人物与关系，输出 JSON，供系统自动生成主谱。
+DIGITIZE_PROMPT_TEMPLATE = f"""你是族谱数字化专家。这是族谱组谱的【第二步】：根据「关系描述稿」提取人物与关系，输出 JSON，供系统自动生成主谱。
 
 【姓名规则】
 - name 必须是 2–4 个汉字的人名（可含公/郎，如「张公」）；
-- 禁止把「一世」「二世」「谱序」「碑记」「长子」等当作 name；
+- 禁止把 {_FORBIDDEN} 当作 name；
 - generation_name 是字/号/辈分用字，不是姓名；
 - 配偶单独列入 persons，并在 relations 中用 type=spouse 连接。
 
@@ -77,10 +80,10 @@ DIGITIZE_PROMPT_TEMPLATE = """你是族谱数字化专家。这是族谱组谱�
 ]}}
 
 【关系描述稿】
-{relation_text}
+{{relation_text}}
 
 【OCR 原文（参考，可为空）】
-{raw_text}
+{{raw_text}}
 
 只返回 JSON，无 markdown。"""
 
@@ -92,8 +95,28 @@ def build_legacy_parse_prompt(text: str) -> str:
 PARSE_PROMPT_TEMPLATE = RELATION_DESCRIBE_PROMPT_TEMPLATE  # 旧 import 名保留，实际 scan 已走两阶段
 
 
-def build_relation_describe_prompt(raw_text: str) -> str:
-    return RELATION_DESCRIBE_PROMPT_TEMPLATE.format(raw_text=(raw_text or "").strip())
+def build_relation_describe_prompt(
+    raw_text: str,
+    *,
+    context_notes: str = "",
+    previous_draft: str = "",
+) -> str:
+    extra = ""
+    if (context_notes or "").strip():
+        extra += f"\n\n【用户对话与整理上下文（请优先采纳其中明确修正意见）】\n{context_notes.strip()}"
+    if (previous_draft or "").strip():
+        extra += (
+            f"\n\n【上一版关系描述稿（可改进，勿无脑复制；以 OCR 原文为准）】\n"
+            f"{previous_draft.strip()[:8000]}"
+        )
+    body = RELATION_DESCRIBE_PROMPT_TEMPLATE.format(raw_text=(raw_text or "").strip())
+    if extra:
+        # 插在 OCR 原文块之前
+        marker = "【版本一 · OCR 原文】"
+        if marker in body:
+            return body.replace(marker, extra + "\n\n" + marker)
+        return body + extra
+    return body
 
 
 def build_digitize_prompt(relation_text: str, raw_text: str = "") -> str:

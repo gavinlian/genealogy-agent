@@ -2,9 +2,9 @@
 import { computed } from 'vue'
 import GenealogyCardTreeView from './GenealogyCardTreeView.vue'
 import SourceSilkwormPageView from './SourceSilkwormPageView.vue'
-import { mapApiPersons, mapApiRelations } from '../../utils/genealogyViewData'
+import RelationGraphView from './RelationGraphView.vue'
 
-export type ReferenceViewMode = 'card' | 'page'
+export type ReferenceViewMode = 'card' | 'page' | 'graph'
 
 const props = withDefaults(
   defineProps<{
@@ -18,7 +18,7 @@ const props = withDefaults(
     unbounded?: boolean
   }>(),
   {
-    mode: 'page',
+    mode: 'graph',
     persons: () => [],
     relations: () => [],
     title: '族谱',
@@ -30,9 +30,6 @@ const props = withDefaults(
 )
 
 const emit = defineEmits<{ select: [personId: string] }>()
-
-const viewPersons = computed(() => mapApiPersons(props.persons))
-const viewRelations = computed(() => mapApiRelations(props.relations))
 
 const selectedName = computed(() => {
   if (!props.selectedPersonId) return null
@@ -51,10 +48,20 @@ function onSelectName(name: string) {
     class="genealogy-reference-view"
     :class="{ 'genealogy-reference-view--fill': fill, 'genealogy-reference-view--unbounded': unbounded }"
   >
+    <RelationGraphView
+      v-if="mode === 'graph'"
+      :persons="persons"
+      :relations="relations"
+      :structured-text="structuredText"
+      :title="title"
+      :selected-name="selectedName"
+      :unbounded="unbounded"
+      @select="onSelectName"
+    />
     <GenealogyCardTreeView
-      v-if="mode === 'card'"
-      :persons="viewPersons"
-      :relations="viewRelations"
+      v-else-if="mode === 'card'"
+      :persons="persons"
+      :relations="relations"
       :structured-text="structuredText"
       :title="title"
       :selected-name="selectedName"
@@ -63,8 +70,8 @@ function onSelectName(name: string) {
     />
     <SourceSilkwormPageView
       v-else
-      :persons="viewPersons"
-      :relations="viewRelations"
+      :persons="persons"
+      :relations="relations"
       :structured-text="structuredText"
       :title="title"
       :selected-name="selectedName"

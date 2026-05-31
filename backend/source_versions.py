@@ -11,17 +11,20 @@ from typing import Any
 VERSION_KIND_OCR_RAW = "ocr_raw"
 VERSION_KIND_RELATION_DESC = "relation_desc"
 VERSION_KIND_CUSTOM = "custom"
+VERSION_KIND_FUSION = "fusion"
 
 DEFAULT_LABELS = {
     VERSION_KIND_OCR_RAW: "版本一 · OCR 原文",
     VERSION_KIND_RELATION_DESC: "版本二 · 关系描述",
     VERSION_KIND_CUSTOM: "版本三 · 自定义",
+    VERSION_KIND_FUSION: "融合稿 · 多版合并",
 }
 
 TEXT_EDITION_NOTE_PREFIX = "text_from:"
 DERIVED_FROM_NOTE_PREFIX = "derived_from:"
 LAYOUT_NOTE_PREFIX = "layout:"
 IMAGE_NOTE_PREFIX = "image:"
+PDF_NOTE_PREFIX = "pdf:"
 
 VALID_SOURCE_LAYOUTS = frozenset({"horizontal_ltr", "horizontal_rtl", "vertical_rl", "prose"})
 DEFAULT_SOURCE_LAYOUT = "horizontal_ltr"
@@ -32,6 +35,7 @@ def parse_version_note(note: str | None) -> dict[str, str | None]:
     out: dict[str, str | None] = {
         "layout": DEFAULT_SOURCE_LAYOUT,
         "image_path": None,
+        "pdf_path": None,
         "derived_from": None,
     }
     for part in (note or "").split("|"):
@@ -44,6 +48,8 @@ def parse_version_note(note: str | None) -> dict[str, str | None]:
                 out["layout"] = layout
         elif token.startswith(IMAGE_NOTE_PREFIX):
             out["image_path"] = token[len(IMAGE_NOTE_PREFIX):].strip() or None
+        elif token.startswith(PDF_NOTE_PREFIX):
+            out["pdf_path"] = token[len(PDF_NOTE_PREFIX):].strip() or None
         elif token.startswith(DERIVED_FROM_NOTE_PREFIX):
             out["derived_from"] = token[len(DERIVED_FROM_NOTE_PREFIX):].strip() or None
     return out
@@ -54,17 +60,23 @@ def merge_version_note(
     *,
     layout: str | None = None,
     image_path: str | None = None,
+    pdf_path: str | None = None,
 ) -> str | None:
     """合并 note 字段，保留未覆盖的既有信息。"""
     parsed = parse_version_note(note)
     if layout and layout in VALID_SOURCE_LAYOUTS:
         parsed["layout"] = layout
     if image_path is not None:
-        parsed["image_path"] = image_path or None
+        val = (image_path or "").strip()
+        parsed["image_path"] = val if val and not val.lower().endswith(".pdf") else None
+    if pdf_path is not None:
+        parsed["pdf_path"] = pdf_path or None
 
     parts: list[str] = []
     if parsed.get("image_path"):
         parts.append(f"{IMAGE_NOTE_PREFIX}{parsed['image_path']}")
+    if parsed.get("pdf_path"):
+        parts.append(f"{PDF_NOTE_PREFIX}{parsed['pdf_path']}")
     if parsed.get("layout") and parsed["layout"] != DEFAULT_SOURCE_LAYOUT:
         parts.append(f"{LAYOUT_NOTE_PREFIX}{parsed['layout']}")
     if parsed.get("derived_from"):
@@ -101,7 +113,11 @@ def _row_to_version(row: sqlite3.Row | dict) -> dict:
         data["source_annotations"] = []
     note_meta = parse_version_note(data.get("note"))
     data["layout_hint"] = note_meta.get("layout") or DEFAULT_SOURCE_LAYOUT
-    data["image_path"] = note_meta.get("image_path")
+    img = note_meta.get("image_path")
+    if img and str(img).lower().endswith(".pdf"):
+        img = None
+    data["image_path"] = img
+    data["pdf_path"] = note_meta.get("pdf_path")
     return data
 
 
@@ -294,6 +310,8 @@ def update_source_version(
     source_annotations: Any = None,
     label: str | None = None,
     note: str | None = None,
+    image_path: str | None = None,
+    layout_hint: str | None = None,
 ) -> dict | None:
     row = cursor.execute(
         "SELECT * FROM family_source_versions WHERE id = ? AND family_id = ?",
@@ -306,6 +324,12 @@ def update_source_version(
     ann = _parse_annotations(source_annotations) if source_annotations is not None else row["source_annotations"]
     lbl = label if label is not None else row["label"]
     nte = note if note is not None else row["note"]
+    if image_path is not None or layout_hint is not None:
+        nte = merge_version_note(
+            nte,
+            layout=layout_hint if layout_hint in VALID_SOURCE_LAYOUTS else None,
+            image_path=image_path,
+        )
     cursor.execute(
         """UPDATE family_source_versions SET source_text=?, source_annotations=?,
            label=?, note=?, updated_at=? WHERE id=?""",
@@ -357,6 +381,39 @@ def find_version_by_kind(cursor: sqlite3.Cursor, family_id: str, kind: str) -> d
         (family_id, kind),
     ).fetchone()
     return _row_to_version(row) if row else None
+
+
+def attach_source_image(
+    cursor: sqlite3.Cursor,
+    family_id: str,
+    image_path: str,
+) -> dict:
+    """为已有族谱挂上扫描原图（写入版本一 OCR 原文；无则自动创建该版）。"""
+    migrate_legacy_family_source(cursor, family_id)
+    v1 = find_version_by_kind(cursor, family_id, VERSION_KIND_OCR_RAW)
+    note = merge_version_note(v1.get("note") if v1 else None, image_path=image_path)
+    if v1:
+        updated = update_source_version(cursor, family_id, v1["id"], image_path=image_path)
+        if not updated:
+            raise ValueError("无法更新版本一原文")
+        return updated
+
+    row = cursor.execute(
+        "SELECT source_text, source_annotations FROM families WHERE id = ?",
+        (family_id,),
+    ).fetchone()
+    text = (row["source_text"] or "").strip() if row else ""
+    ann = row["source_annotations"] if row else None
+    return upsert_version_by_kind(
+        cursor,
+        family_id,
+        VERSION_KIND_OCR_RAW,
+        source_text=text,
+        source_annotations=ann,
+        label=DEFAULT_LABELS.get(VERSION_KIND_OCR_RAW),
+        status="draft",
+        note=note,
+    )
 
 
 def upsert_version_by_kind(
@@ -439,6 +496,7 @@ def save_ocr_scan_versions(
     custom_text: str = "",
     source_annotations: Any = None,
     image_path: str | None = None,
+    pdf_path: str | None = None,
     layout_hint: str = DEFAULT_SOURCE_LAYOUT,
     active_kind: str = VERSION_KIND_RELATION_DESC,
 ) -> dict:
@@ -449,11 +507,17 @@ def save_ocr_scan_versions(
     if not ocr and not rel:
         raise ValueError("至少需要版本一 OCR 原文或版本二关系描述")
 
+    img = (image_path or "").strip()
+    if img.lower().endswith(".pdf"):
+        img = ""
+    pdf = (pdf_path or "").strip()
+
     v1 = find_version_by_kind(cursor, family_id, VERSION_KIND_OCR_RAW)
     note_v1 = merge_version_note(
         v1.get("note") if v1 else None,
         layout=layout_hint if layout_hint in VALID_SOURCE_LAYOUTS else DEFAULT_SOURCE_LAYOUT,
-        image_path=image_path,
+        image_path=img or None,
+        pdf_path=pdf or None,
     )
     if ocr:
         v1 = upsert_version_by_kind(
