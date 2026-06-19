@@ -18,6 +18,7 @@ from agent.agent_tools import (
     ui_prefill_person,
     ui_set_anchor,
     ui_switch_tab,
+    ui_organize_pipeline,
     ui_organize_regenerate,
 )
 from agent.graph_store import GraphStore
@@ -300,6 +301,8 @@ async def execute_regenerate_source_tool(
     kind = (params.get("kind") or params.get("target") or "relation_desc").strip().lower()
     if kind in ("ocr", "v1", "version1", "ocr_raw", "ocr原文", "版本一"):
         kind = "ocr_raw"
+    elif kind in ("custom", "v3", "version3", "修正稿", "版本三"):
+        kind = "custom"
     else:
         kind = "relation_desc"
 
@@ -393,6 +396,101 @@ async def execute_regenerate_source_tool(
         ui_actions=ui_actions,
         tool_calls=tool_calls,
         state_patch=state_patch,
+        data=result,
+    )
+
+
+async def execute_regenerate_pipeline_tool(
+    params: dict[str, Any],
+    *,
+    cursor,
+    family_id: str,
+    ai_configured: bool,
+) -> ToolResult:
+    """递进 AI 重生版本链并返回族谱预览。"""
+    tool_calls = [{"tool": "regenerate_source_pipeline", "params": params}]
+    if not cursor or not family_id:
+        return ToolResult(False, "递进生成需要族谱上下文。", tool_calls=tool_calls)
+    if not ai_configured:
+        return ToolResult(
+            False,
+            "递进生成需要先在设置中配置 OCR / 关系解析模型。",
+            tool_calls=tool_calls,
+        )
+
+    from main import UPLOAD_DIR, call_text_model, call_vision_model, load_model_selection
+    from agent.regenerate_context import build_regenerate_context
+    from agent.source_regenerate import regenerate_source_pipeline
+    from agent.generation_model import family_generation_context
+
+    sel = load_model_selection()
+    ocr_cfg = sel.get("ocr") or {}
+    parse_cfg = sel.get("parse") or {}
+    ocr_provider = ocr_cfg.get("provider") or "minimax"
+    ocr_model = ocr_cfg.get("model") or ""
+    parse_provider = parse_cfg.get("provider") or "minimax"
+    parse_model = parse_cfg.get("model") or ""
+
+    fam_row = cursor.execute("SELECT * FROM families WHERE id = ?", (family_id,)).fetchone()
+    fam = dict(fam_row) if fam_row else {}
+    gen_ctx = family_generation_context(fam)
+
+    persons_rows = cursor.execute("SELECT name FROM persons WHERE family_id = ?", (family_id,)).fetchall()
+    ctx = build_regenerate_context(cursor, family_id, persons=[{"name": r["name"]} for r in persons_rows])
+
+    full = bool(params.get("full", True))
+    from_ocr = bool(params.get("from_ocr"))
+    if from_ocr:
+        steps = ["ocr_raw", "relation_desc", "custom"]
+    elif full:
+        steps = ["ocr_raw", "relation_desc", "custom"]
+    else:
+        steps = ["relation_desc", "custom"]
+
+    async def vision_fn(provider, model, img, prompt):
+        return await call_vision_model(provider, model, img, prompt)
+
+    async def text_fn(provider, model, prompt, max_tokens=8192):
+        return await call_text_model(provider, model, prompt, max_tokens=max_tokens)
+
+    result = await regenerate_source_pipeline(
+        cursor,
+        family_id,
+        UPLOAD_DIR,
+        steps=steps,
+        ocr_provider=ocr_provider,
+        ocr_model=ocr_model,
+        parse_provider=parse_provider,
+        parse_model=parse_model,
+        vision_fn=vision_fn,
+        text_fn=text_fn,
+        context_notes=ctx.get("context_notes") or "",
+        generation_scheme=gen_ctx.get("generation_scheme") or "absolute",
+        generation_epoch_offset=gen_ctx.get("generation_epoch_offset") or 1,
+    )
+    tool_calls[0]["result"] = result
+    ui_actions: list[dict] = [ui_switch_tab("organize"), ui_organize_pipeline(full=full, synced=True)]
+    if not result.get("success"):
+        return ToolResult(
+            False,
+            result.get("error") or "递进生成失败",
+            ui_actions=[ui_switch_tab("organize")],
+            tool_calls=tool_calls,
+            state_patch={"active_tab": "organize"},
+        )
+
+    preview = result.get("preview") or {}
+    person_count = preview.get("stats", {}).get("person_count", len(preview.get("persons") or []))
+    summary = (
+        f"{result.get('message') or '递进生成完成'}\n\n"
+        f"预览约 {person_count} 人。已打开整理页，请核对关系图后写入主谱。"
+    )
+    return ToolResult(
+        True,
+        summary,
+        ui_actions=ui_actions,
+        tool_calls=tool_calls,
+        state_patch={"active_tab": "organize", "_pipeline_preview": preview},
         data=result,
     )
 

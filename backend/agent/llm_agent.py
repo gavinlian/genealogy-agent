@@ -14,6 +14,7 @@ from agent.tool_executor import (
     AiFn,
     execute_read_tool,
     execute_regenerate_source_tool,
+    execute_regenerate_pipeline_tool,
     propose_organize_tool,
     propose_write_tool,
 )
@@ -22,7 +23,7 @@ ChatFn = Callable[[list[dict[str, str]]], Awaitable[tuple[str, str]]]
 
 READ_TOOLS = frozenset({
     "search_persons", "query_relatives", "find_relationship", "get_person_detail",
-    "get_source_text", "fuse_source_versions", "regenerate_source_version",
+    "get_source_text", "fuse_source_versions", "regenerate_source_version", "regenerate_source_pipeline",
     "ui_switch_tab", "ui_focus_person",
     "ui_set_anchor", "ui_open_classic", "ui_open_settings", "ui_open_scan",
 })
@@ -71,7 +72,8 @@ def build_agent_system_prompt(
 - get_person_detail: { "person_name"?, "use_selected"? }
 - get_source_text: {}
 - fuse_source_versions: { "include_tree"?: true }  — 融合各版原文与主谱关系，生成逐步文字稿
-- regenerate_source_version: { "kind": "ocr_raw"|"relation_desc" }  — AI 重新生成并写入版本一 OCR 或版本二关系描述
+- regenerate_source_version: { "kind": "ocr_raw"|"relation_desc"|"custom" }  — AI 重新生成并写入对应版本
+- regenerate_source_pipeline: { "full"?: true }  — 递进生成 ①→②→③ 并返回族谱预览
 - ui_switch_tab: { "tab": "tree|source|fusion|person|diff|organize" }
 - ui_focus_person: { "person_name": "..." }
 - ui_set_anchor: { "person_name": "...", "use_selected"? }
@@ -277,6 +279,17 @@ async def run_agent_turn_llm(
     if tool_name in READ_TOOLS:
         if tool_name == "regenerate_source_version":
             result = await execute_regenerate_source_tool(
+                params,
+                cursor=deps.cursor,
+                family_id=deps.family_id,
+                ai_configured=deps.ai_configured,
+            )
+            if result.success and not llm_reply:
+                llm_reply = await _summarize_with_llm(deps, message, tool_name, result.summary)
+            return _tool_result_to_turn(result, llm_reply=llm_reply)
+
+        if tool_name == "regenerate_source_pipeline":
+            result = await execute_regenerate_pipeline_tool(
                 params,
                 cursor=deps.cursor,
                 family_id=deps.family_id,

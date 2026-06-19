@@ -149,3 +149,17 @@ def test_batch_save_after_generate(client):
     assert batch.json()["relation_count"] >= 1
     tree = client.get(f"/api/families/{fid}/tree").json()
     assert tree["root_count"] >= 1
+
+
+def test_parse_local_restart_epoch_offset():
+    text = "一世 张公\n二世 张子"
+    result = parse_genealogy_text_enhanced(
+        text,
+        generation_scheme="local_restart",
+        generation_epoch_offset=15,
+    )
+    by_name = {p["name"]: p for p in result["persons"]}
+    assert by_name["张公"]["source_generation"] == 1
+    assert by_name["张公"]["generation"] == 15
+    assert by_name["张子"]["source_generation"] == 2
+    assert by_name["张子"]["generation"] == 16

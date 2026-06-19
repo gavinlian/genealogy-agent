@@ -24,7 +24,11 @@ FAMILY_EXTRA_COLUMNS = [
     ("start_generation", "INTEGER DEFAULT 1"),
     ("source_text", "TEXT"),
     ("source_annotations", "TEXT"),
+    ("generation_scheme", "TEXT DEFAULT 'absolute'"),
+    ("generation_epoch_offset", "INTEGER DEFAULT 1"),
 ]
+
+PERSON_SOURCE_GENERATION_COLUMN = ("source_generation", "INTEGER")
 
 
 def migrate_schema(cursor: sqlite3.Cursor) -> None:
@@ -43,6 +47,11 @@ def migrate_schema(cursor: sqlite3.Cursor) -> None:
             cursor.execute(f"ALTER TABLE families ADD COLUMN {col} {typedef}")
         except sqlite3.OperationalError:
             pass
+    try:
+        col, typedef = PERSON_SOURCE_GENERATION_COLUMN
+        cursor.execute(f"ALTER TABLE persons ADD COLUMN {col} {typedef}")
+    except sqlite3.OperationalError:
+        pass
 
 
 def row_to_person(row: sqlite3.Row | dict) -> dict:

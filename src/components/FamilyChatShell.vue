@@ -22,7 +22,7 @@ import GenealogyOrganizeWorkspace from './GenealogyOrganizeWorkspace.vue'
 import SourceFusionPanel from './SourceFusionPanel.vue'
 import FamilyMergePanel from './FamilyMergePanel.vue'
 import AgentDiscoveryPanel from './AgentDiscoveryPanel.vue'
-import SourceImageZoom from './SourceImageZoom.vue'
+import SourceImagePanel from './SourceImagePanel.vue'
 import { uploadImageUrl } from '../utils/uploadImageUrl'
 import { useChatSidebar } from '../composables/useChatSidebar'
 import { useToast } from '../composables/useToast'
@@ -70,7 +70,7 @@ const emit = defineEmits<{
 const TABS: { id: TabId; label: string; icon: string }[] = [
   { id: 'tree', label: '族谱', icon: '🌳' },
   { id: 'discoveries', label: '发现', icon: '🔔' },
-  { id: 'organize', label: '整理', icon: '✨' },
+  { id: 'organize', label: '整理组谱', icon: '✨' },
   { id: 'source', label: '原文', icon: '📜' },
   { id: 'fusion', label: '合并整理', icon: '🔗' },
 ]
@@ -145,7 +145,16 @@ const sourceV1Version = computed(() =>
   sourceVersions.value.find((v) => v.version_kind === 'ocr_raw') || null,
 )
 
+const sourceImagePaths = computed(() => {
+  const paths = sourceV1Version.value?.image_paths
+  if (Array.isArray(paths) && paths.length) return paths.filter(Boolean)
+  const single = sourceV1Version.value?.image_path
+  return single ? [single] : []
+})
+
 const sourceImageUrl = computed(() => uploadImageUrl(sourceV1Version.value?.image_path))
+
+const sourceImagePanelExpanded = ref(false)
 
 const sourceV1Text = computed(() => (sourceV1Version.value?.source_text || '').trim())
 
@@ -526,6 +535,7 @@ function applyUiActions(actions: AgentUiAction[]) {
     openSettings: () => emit('settings'),
     openScan: () => emit('scan'),
     organizeRegenerate: (target, synced) => handleOrganizeRegenerate(target, synced),
+    organizePipeline: (opts) => handleOrganizePipeline(opts),
   })
   setAgentLinkHint(hints)
 }
@@ -542,9 +552,20 @@ async function handleOrganizeRegenerate(target: string, synced?: boolean) {
   }
   if (target === 'ocr_raw') {
     await organizeWorkspaceRef.value?.regenerateOcr?.()
+  } else if (target === 'custom') {
+    await organizeWorkspaceRef.value?.regenerateCustom?.()
   } else {
     await organizeWorkspaceRef.value?.regenerateRelation?.()
   }
+  emit('refresh')
+}
+
+async function handleOrganizePipeline(opts?: { full?: boolean; fromOcr?: boolean }) {
+  activeTab.value = 'organize'
+  triggerAgentPulse('organize')
+  await organize.loadState()
+  await nextTick()
+  await organizeWorkspaceRef.value?.runPipeline?.(opts)
   emit('refresh')
 }
 
@@ -676,7 +697,8 @@ async function sendChat(text: string) {
     }
 
     const hasRegenTool = (res.tool_calls || []).some(
-      (tc: { tool?: string }) => tc.tool === 'regenerate_source_version',
+      (tc: { tool?: string }) =>
+        tc.tool === 'regenerate_source_version' || tc.tool === 'regenerate_source_pipeline',
     )
     if (hasRegenTool) {
       await loadSourcePreview()
@@ -816,6 +838,7 @@ watch(() => props.family?.id, (id) => {
           v-if="hasFamily"
           type="button"
           class="btn-secondary btn-sm agent-classic-btn"
+          title="看树、改成员、合并；版本一二三请用本页「整理组谱」Tab"
           @click="emit('switchClassic')"
         >
           经典编辑
@@ -1002,7 +1025,7 @@ watch(() => props.family?.id, (id) => {
               <div v-show="activeTab === 'source'" class="agent-page agent-page--source">
                 <div class="agent-source-toolbar">
                   <span class="hint">
-                    {{ sourceImageUrl ? '扫描原图 ↔ 版本一 OCR 原文' : '当前活跃原文版本（上传扫描图请用「整理」→ ① 扫描 OCR）' }}
+                    {{ sourceImagePaths.length ? '点「查看原图」对照版本一 OCR 原文' : '当前活跃原文版本（上传扫描图请用「整理」→ ① 扫描 OCR）' }}
                   </span>
                   <button type="button" class="btn-xs btn-secondary" @click="emit('switchClassic', 'source')">
                     经典编辑 · 对照校对
@@ -1012,10 +1035,14 @@ watch(() => props.family?.id, (id) => {
                   <strong v-if="selectedPerson">节选 · {{ selectedPerson.name }}</strong>
                   <p>{{ sourceExcerpt }}</p>
                 </div>
-                <div v-if="sourceImageUrl" class="agent-source-pair">
-                  <div class="agent-source-pair-image">
-                    <SourceImageZoom :src="sourceImageUrl" alt="族谱扫描原图" />
-                  </div>
+                <div v-if="sourceImagePaths.length || sourceImageUrl" class="agent-source-pair">
+                  <SourceImagePanel
+                    v-model:expanded="sourceImagePanelExpanded"
+                    :image-path="sourceV1Version?.image_path"
+                    :image-paths="sourceImagePaths"
+                    alt="族谱扫描原图"
+                    compact
+                  />
                   <div class="agent-source-pair-text">
                     <p class="hint agent-source-pair-label">版本一 · OCR 原文</p>
                     <textarea

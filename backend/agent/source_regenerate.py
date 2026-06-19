@@ -6,9 +6,9 @@ import base64
 import os
 from typing import Any, Awaitable, Callable
 
-from agent.genealogy_prompts import build_relation_describe_prompt
+from agent.genealogy_prompts import build_custom_refine_prompt, build_relation_describe_prompt
 from agent.pipeline import run_ocr_only
-from agent.relation_text import build_local_relation_description
+from agent.relation_text import build_local_relation_description, clean_relation_description
 from source_versions import (
     VERSION_KIND_CUSTOM,
     VERSION_KIND_OCR_RAW,
@@ -96,6 +96,7 @@ async def regenerate_relation_desc(
     context_notes: str = "",
     previous_draft: str = "",
     allow_rule_fallback: bool = True,
+    page: int | None = None,
 ) -> dict[str, Any]:
     """用 AI（+可选规则降级）从版本一 OCR 重新生成关系描述，并写入版本库。"""
     raw = (ocr_text or "").strip()
@@ -113,17 +114,39 @@ async def regenerate_relation_desc(
     ai_error = ""
     relation_text = ""
 
-    prompt = build_relation_describe_prompt(
-        raw,
-        context_notes=context_notes,
-        previous_draft=previous_draft,
-    )
+    v2_row = find_version_by_kind(cursor, family_id, VERSION_KIND_RELATION_DESC)
+    v2_text = (v2_row.get("source_text") if v2_row else "") or ""
+
+    if kind == VERSION_KIND_CUSTOM and not page:
+        rel_input = (previous_draft or v2_text or "").strip()
+        if not rel_input:
+            return {
+                "success": False,
+                "error": "请先生成或保存版本二关系描述，再重生版本三修正稿。",
+                "used_ai": False,
+            }
+        prompt = build_custom_refine_prompt(
+            rel_input,
+            raw,
+            context_notes=context_notes,
+            previous_draft=previous_draft,
+        )
+    else:
+        prompt = build_relation_describe_prompt(
+            raw,
+            context_notes=context_notes,
+            previous_draft=previous_draft,
+            page=page,
+        )
     content, err = await text_fn(parse_provider, parse_model, prompt)
-    relation_text = (content or "").strip()
+    relation_text = clean_relation_description(content or "")
     if not relation_text or len(relation_text) < 4:
         ai_error = err or "AI 未能生成关系描述稿"
         if allow_rule_fallback:
-            relation_text = build_local_relation_description(raw)
+            from source_pages import get_page_text
+
+            fallback_src = get_page_text(raw, page) if page else raw
+            relation_text = build_local_relation_description(fallback_src)
         if not relation_text or len(relation_text) < 4:
             return {
                 "success": False,
@@ -131,6 +154,13 @@ async def regenerate_relation_desc(
                 "used_ai": False,
                 "ai_error": ai_error,
             }
+
+    if page is not None and page > 0:
+        from source_pages import set_page_text
+
+        existing = find_version_by_kind(cursor, family_id, kind)
+        existing_full = (existing.get("source_text") if existing else "") or ""
+        relation_text = set_page_text(existing_full, page, relation_text)
 
     used_ai = not ai_error and bool(content and len(content.strip()) >= 4)
     fallback_reason = ""
@@ -183,3 +213,107 @@ def preview_excerpt(text: str, limit: int = 280) -> str:
     if len(t) <= limit:
         return t
     return t[:limit] + "…"
+
+
+async def regenerate_source_pipeline(
+    cursor,
+    family_id: str,
+    upload_dir: str,
+    *,
+    steps: list[str] | None = None,
+    ocr_provider: str,
+    ocr_model: str,
+    parse_provider: str,
+    parse_model: str,
+    vision_fn: VisionFn,
+    text_fn: TextFn,
+    context_notes: str = "",
+    generation_scheme: str = "absolute",
+    generation_epoch_offset: int = 1,
+) -> dict[str, Any]:
+    """按序 AI 重生版本一→二→三，并解析族谱预览。"""
+    from agent.genealogy_builder import auto_build_genealogy, parse_genealogy_text_enhanced
+    from agent.generation_model import normalize_scheme
+
+    ordered = steps or ["ocr_raw", "relation_desc", "custom"]
+    valid = {"ocr_raw", "relation_desc", "custom"}
+    run_steps = [s for s in ordered if s in valid]
+    if not run_steps:
+        run_steps = ["relation_desc"]
+
+    step_results: list[dict[str, Any]] = []
+    for step in run_steps:
+        if step == "ocr_raw":
+            result = await regenerate_ocr_raw(
+                cursor,
+                family_id,
+                upload_dir,
+                ocr_provider=ocr_provider,
+                ocr_model=ocr_model,
+                vision_fn=vision_fn,
+            )
+        else:
+            target = VERSION_KIND_CUSTOM if step == "custom" else VERSION_KIND_RELATION_DESC
+            result = await regenerate_relation_desc(
+                cursor,
+                family_id,
+                parse_provider=parse_provider,
+                parse_model=parse_model,
+                text_fn=text_fn,
+                target_kind=target,
+                context_notes=context_notes,
+            )
+        step_results.append({"step": step, **result})
+        if not result.get("success"):
+            return {
+                "success": False,
+                "error": result.get("error") or f"步骤 {step} 失败",
+                "steps": step_results,
+            }
+
+    v3 = find_version_by_kind(cursor, family_id, VERSION_KIND_CUSTOM)
+    v2 = find_version_by_kind(cursor, family_id, VERSION_KIND_RELATION_DESC)
+    digitize_text = ""
+    if v3 and (v3.get("source_text") or "").strip():
+        digitize_text = (v3.get("source_text") or "").strip()
+    elif v2 and (v2.get("source_text") or "").strip():
+        digitize_text = (v2.get("source_text") or "").strip()
+
+    preview: dict[str, Any] = {"persons": [], "relations": [], "stats": {}}
+    if digitize_text:
+        scheme = normalize_scheme(generation_scheme)
+        offset = max(1, int(generation_epoch_offset or 1))
+        built = auto_build_genealogy(
+            digitize_text,
+            generation_scheme=scheme,
+            generation_epoch_offset=offset,
+        )
+        if built.get("success"):
+            preview = {
+                "persons": built.get("persons") or [],
+                "relations": built.get("relations") or [],
+                "stats": built.get("stats") or {},
+                "tree": built.get("tree"),
+            }
+        else:
+            parsed = parse_genealogy_text_enhanced(
+                digitize_text,
+                generation_scheme=scheme,
+                generation_epoch_offset=offset,
+            )
+            preview = {
+                "persons": parsed.get("persons") or [],
+                "relations": parsed.get("relations") or [],
+                "stats": {"person_count": len(parsed.get("persons") or [])},
+            }
+
+    return {
+        "success": True,
+        "steps": step_results,
+        "digitize_text": digitize_text,
+        "preview": preview,
+        "message": (
+            f"已完成 {len(step_results)} 步递进生成；"
+            f"预览 {preview.get('stats', {}).get('person_count', len(preview.get('persons') or []))} 人。"
+        ),
+    }

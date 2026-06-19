@@ -81,9 +81,14 @@
   ],
 
   "relation_text_format": {
-    "hint": "每行一人，或一行写清「姓名 + 配偶 + 子女」；世代用「一世 / 第2世」标在行首。",
+    "format_id": "RDL",
+    "format_name": "Relation Description Lines · 按页按人分行",
+    "design_reference": "GEDCOM 7 INDI+FAM；中文族谱配/子/女行内字段",
+    "hint": "按谱页分页；每行一人；世代+姓名+配/子/女/父/母；禁止分析段落",
     "line_template": "{generation} {name} {gender} [字{courtesy}] [生{birth}] [卒{death}] [配{spouse}] [子{children}]",
     "recommended_line_example": "一世 张公 男 字德明 生1920 配李氏 子张三,张四",
+    "page_header_template": "===== 第 {page} 页 =====",
+    "page_header_regex": "^===== 第\\s*(\\d+)\\s*(?:页|张)",
     "relation_block_header": "【关系】",
     "relation_syntax": [
       { "type": "parent_child", "patterns": ["{parent} → {child}（父子）", "{parent} 子 {child}", "行内 子:名1,名2"], "direction": "from_parent_to_child" },
@@ -99,11 +104,13 @@
       "children": ["子", "之子", "嗣子", "女", "之女"]
     },
     "rules": [
+      "多页时必须用「===== 第 N 页 =====」与版本一 OCR 页码对齐",
       "每行对应一个真实人物，或一行写清配偶与子女列表",
-      "父子：子名跟在父名后，或单独一行「父名 → 子名」",
-      "配偶：用「配某某」或「A 配 B」",
+      "父子：行内「子名1,名2」或「父X 母Y」或「父名 → 子名」",
+      "配偶：用「配某某」或「A 配 B」，配偶须单独成行或在【关系】块出现",
       "不要把「一世」「谱序」「长子」当作人名",
-      "不确定的字用 [] 标注，不得编造原文没有的人名"
+      "不确定的字用 [] 标注，不得编造原文没有的人名",
+      "禁止前言、分析、总结；只输出 RDL 正文"
     ],
     "forbidden_as_names": [
       "族谱", "家谱", "宗谱", "谱序", "碑记", "世系", "世次",
@@ -111,6 +118,40 @@
       "一世", "二世", "三世", "第一代", "第二代",
       "生于", "卒于", "享年", "配氏", "说明", "备注"
     ]
+  },
+
+  "page_model": {
+    "description": "一页一图一 OCR 一关系描述；合并存储时用 page_header_template 分隔",
+    "fields_per_page": ["page", "image_path", "ocr_text", "relation_text"],
+    "ui_workbench": "GenealogyPageWorkbench",
+    "stages": {
+      "v1": { "left": "image", "right": "ocr_text", "label": "版本一 · 原图↔OCR" },
+      "v2": { "left": "image", "right": "relation_text", "baseline": "ocr_text", "label": "版本二 · 原图↔关系描述" },
+      "v3": { "mode": "visual_canvas", "label": "版本三 · 拖拽世代/配偶/子女", "status": "planned" }
+    }
+  },
+
+  "generation_model": {
+    "description": "谱书世次与全谱世次分离；支谱常出现「谱面一世 = 全谱第15世」",
+    "fields": {
+      "source_generation": "谱书/OCR/RDL 行首标注的世次",
+      "canonical_generation": "入库与排树用的全谱世次",
+      "generation_epoch_offset": "谱书一世对应的全谱世次（local_restart 时必填，如 15）"
+    },
+    "schemes": {
+      "absolute": "全谱从始祖起编，谱面世次即全谱世次（默认）",
+      "local_restart": "支谱/续修：谱面从一世重计，canonical = source + offset - 1",
+      "zibei_assist": "字辈序列辅助校验，不单独替代父子链"
+    },
+    "rdl_optional_tag": "[全世N]",
+    "family_fields": ["generation_scheme", "generation_epoch_offset", "root_person_id", "start_generation", "zibei_sequence"],
+    "implementation_status": {
+      "parse_source_generation": "done",
+      "recalculate_from_root": "done",
+      "dual_generation_fields": "planned",
+      "ui_epoch_offset": "planned",
+      "zibei_inference": "planned"
+    }
   },
 
   "digitize": {

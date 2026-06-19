@@ -17,6 +17,7 @@ from agent.agent_tools import (
     ui_open_classic,
     ui_open_scan,
     ui_open_settings,
+    ui_organize_pipeline,
     ui_organize_regenerate,
     ui_set_anchor,
     ui_switch_tab,
@@ -146,10 +147,11 @@ def _version_workflow_reply() -> str:
 
 
 def _detect_regenerate_kind(message: str) -> str | None:
-    """识别用户要 AI 重生版本一 OCR 还是版本二关系描述。"""
+    """识别用户要 AI 重生版本一 OCR、版本二关系描述或版本三修正稿。"""
     msg = message.strip()
     mentions_v1 = bool(re.search(r"版本\s*[一1]|OCR|扫描(?:图|识别)?|识别(?:出来)?的?(?:文字|原文)", msg, re.I))
-    mentions_v2 = bool(re.search(r"版本\s*[二2三3]|关系(?:描述|文字)|整理.*关系", msg, re.I))
+    mentions_v2 = bool(re.search(r"版本\s*[二2]|关系(?:描述|文字)|整理.*关系", msg, re.I))
+    mentions_v3 = bool(re.search(r"版本\s*[三3]|修正稿|定稿|校对稿", msg, re.I))
 
     ocr_action = re.search(
         r"重新(?:识别|OCR|扫描)|再次(?:生成|识别)|重做(?:OCR|识别)?|"
@@ -165,7 +167,14 @@ def _detect_regenerate_kind(message: str) -> str | None:
         msg,
         re.I,
     )
+    custom_action = re.search(
+        r"修正稿|定稿|版本\s*三|重新(?:校对|修正|润色)",
+        msg,
+        re.I,
+    )
 
+    if custom_action and (mentions_v3 or not mentions_v1):
+        return "custom"
     if ocr_action and (mentions_v1 or not mentions_v2):
         return "ocr_raw"
     if rel_action and (mentions_v2 or not mentions_v1):
@@ -179,15 +188,40 @@ def _detect_regenerate_kind(message: str) -> str | None:
     return None
 
 
+def _detect_pipeline_regenerate(message: str) -> bool:
+    """识别「从头递进生成 / 完整重做流水线」。"""
+    msg = message.strip()
+    return bool(re.search(
+        r"从头(?:整理|生成|做)|完整(?:重新)?(?:生成|整理)|递进生成|"
+        r"一键(?:整理|生成)|层层(?:递进|生成)|全流程|"
+        r"重新(?:做|来).*(?:整套|全部|完整)|"
+        r"版本(?:一|1).*(?:到|→|->).*(?:三|3|族谱)",
+        msg,
+        re.I,
+    ))
+
+
 def _regenerate_reply(kind: str) -> str:
     if kind == "ocr_raw":
         return (
             "好的，正在用扫描图 **重新识别版本一 OCR** 并自动写入原文库…\n"
             "（需已上传族谱图片且配置 OCR 模型，约需几十秒）"
         )
+    if kind == "custom":
+        return (
+            "好的，正在从版本二 **重新生成版本三修正稿** 并自动填入…\n"
+            "（对照 OCR 查漏，约需几十秒）"
+        )
     return (
         "好的，正在从版本一 OCR **重新生成版本二关系描述** 并自动填入…\n"
         "（需已保存版本一文字且配置关系解析模型，完成后可在整理页预览并写入主谱）"
+    )
+
+
+def _pipeline_regenerate_reply() -> str:
+    return (
+        "好的，正在 **递进生成**：版本一 OCR → 版本二关系描述 → 版本三修正稿 → 族谱预览…\n"
+        "完成后会打开整理页，请核对关系图后点「写入主谱」。约需 1–3 分钟。"
     )
 
 
@@ -413,7 +447,17 @@ def run_agent_turn(
             state_patch=state_patch,
         )
 
-    # 5a) AI 重生版本一 OCR / 版本二关系描述（对话触发，前端或 LLM 工具执行）
+    # 5a) AI 递进生成 / 单版重生（对话触发）
+    if _detect_pipeline_regenerate(msg):
+        ui_actions.extend([ui_switch_tab("organize"), ui_organize_pipeline(full=True)])
+        state_patch["active_tab"] = "organize"
+        return AgentTurnResult(
+            reply=_pipeline_regenerate_reply(),
+            ui_actions=ui_actions,
+            tool_calls=[{"tool": "regenerate_source_pipeline", "params": {"full": True}}],
+            state_patch=state_patch,
+        )
+
     regen_kind = _detect_regenerate_kind(msg)
     if regen_kind:
         ui_actions.extend([ui_switch_tab("organize"), ui_organize_regenerate(regen_kind)])

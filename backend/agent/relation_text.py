@@ -2,7 +2,50 @@
 
 from __future__ import annotations
 
+import re
+
 from .genealogy_builder import parse_genealogy_text_enhanced
+
+_META_LINE_PATTERNS = (
+    re.compile(r"^#{1,6}\s"),
+    re.compile(r"^```"),
+    re.compile(r"^【?(说明|总结|备注|分析|提示)】?"),
+    re.compile(r"^(根据|以下|综上|总之|请注意|温馨提示)"),
+    re.compile(r"分析如下"),
+    re.compile(r"^版本[一二三2-3]\s*[·:：]"),
+    re.compile(r"^关系描述稿"),
+)
+
+
+def clean_relation_description(text: str) -> str:
+    """去掉 AI 输出的说明/分析段落，保留可解析的关系描述正文。"""
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+
+    cleaned = re.sub(r"^```[\w-]*\s*\n?", "", raw)
+    cleaned = re.sub(r"\n?```\s*$", "", cleaned)
+
+    kept: list[str] = []
+    blank_pending = False
+    for line in cleaned.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            if kept and kept[-1] != "":
+                blank_pending = True
+            continue
+        if any(p.search(stripped) for p in _META_LINE_PATTERNS):
+            continue
+        if stripped.startswith("【") and stripped.endswith("】") and len(stripped) <= 12:
+            if any(k in stripped for k in ("说明", "总结", "分析", "备注")):
+                continue
+        if blank_pending:
+            kept.append("")
+            blank_pending = False
+        kept.append(line.rstrip())
+
+    out = "\n".join(kept).strip()
+    return out or raw
 
 
 def build_local_relation_description(raw_text: str) -> str:

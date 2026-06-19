@@ -13,9 +13,9 @@ const API_TIMEOUT_LONG = 300_000
 const API_TIMEOUT_PDF = 900_000
 
 const LONG_PATH =
-  /smart-suggest|ai-organize|source-fusion|scan-ocr|regenerate-relation|\/ocr\/|\/rebuild|parse-import|clear-genealogy|\/agent\/(genealogy-scan|generate|pdf\/scan-ocr)/i
+  /smart-suggest|ai-organize|source-fusion|scan-ocr|regenerate-relation|regenerate-pipeline|\/ocr\/|\/rebuild|parse-import|clear-genealogy|\/agent\/(genealogy-scan|generate|pdf\/scan-ocr|batch\/scan-ocr)/i
 
-const PDF_PATH = /\/agent\/pdf\/scan-ocr/i
+const PDF_PATH = /\/agent\/(pdf\/scan-ocr|batch\/scan-ocr)/i
 
 const AGENT_PATH = /\/agent\/(chat|home\/chat|confirm)/i
 
@@ -110,4 +110,4 @@ export async function pingBackend(): Promise<{ ok: boolean; message?: string; fa
   }
 }
 
-export { API_TIMEOUT, API_TIMEOUT_AGENT, API_TIMEOUT_LONG, resolveApiTimeout }
+export { API_TIMEOUT, API_TIMEOUT_AGENT, API_TIMEOUT_LONG, API_TIMEOUT_PDF, resolveApiTimeout }

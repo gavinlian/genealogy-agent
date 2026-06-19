@@ -39,6 +39,7 @@ from agent.source_person_sync import (
     apply_person_detail_patches,
     compute_person_detail_patches,
 )
+from agent.source_diff import compare_genealogy_with_source, compare_parsed_with_genealogy
 from ai_organize_store import (
     clear_ai_chat_messages,
     ensure_ai_chat_table,
@@ -78,6 +79,7 @@ from agent.generation_engine import recalculate_generations, add_person_with_kin
 from agent.search import search_persons
 from agent.nl_search import nl_search_with_ai, rule_based_nl_search
 from agent.pdf_scan import run_pdf_ocr_pipeline
+from agent.batch_scan import run_batch_ocr_pipeline
 from agent.pdf_export import generate_genealogy_html
 from pdf_import import get_pdf_info, normalize_pdf_base64
 from agent.review import annotate_persons_for_review
@@ -525,6 +527,18 @@ def get_db():
     conn.execute("PRAGMA busy_timeout=10000")
     return conn
 
+
+def resolve_request_user_id(header_user_id: str | None) -> str:
+    """从请求头解析用户 id（无 DB 上下文时的快捷入口）。"""
+    conn = get_db()
+    c = conn.cursor()
+    try:
+        uid = resolve_user_id(c, header_user_id)
+        conn.commit()
+        return uid
+    finally:
+        conn.close()
+
 # ==================== AI 配置 API ====================
 
 @app.get("/api/ai/providers")
@@ -589,7 +603,7 @@ async def get_ai_config():
 @app.get("/api/ai/routing")
 async def get_ai_routing(x_user_id: str | None = Header(default=None, alias="X-User-Id")):
     """Auto 调度状态：额度、推荐模型、平台/自带 Key 可用性。"""
-    user_id = resolve_user_id(x_user_id)
+    user_id = resolve_request_user_id(x_user_id)
     conn = get_db()
     c = conn.cursor()
     try:
@@ -1008,15 +1022,15 @@ def _insert_person_row(cursor, pid: str, family_id: str, person: dict, now: str)
     cursor.execute(
         """INSERT INTO persons (
             id, family_id, name, gender, birth_year, death_year, generation,
-            generation_name, generation_prefix, parent_id,
+            source_generation, generation_name, generation_prefix, parent_id,
             courtesy_name, art_name, county, town, village, biography,
             ai_confidence, review_status, status, is_placeholder, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             pid, family_id, person.get("name"), person.get("gender", "unknown"),
             person.get("birth_year"), person.get("death_year"), person.get("generation"),
-            person.get("generation_name"), person.get("generation_prefix"), person.get("parent_id"),
-            person.get("courtesy_name"), person.get("art_name"),
+            person.get("source_generation"), person.get("generation_name"), person.get("generation_prefix"),
+            person.get("parent_id"), person.get("courtesy_name"), person.get("art_name"),
             person.get("county"), person.get("town"), person.get("village"),
             person.get("biography"), person.get("ai_confidence"),
             person.get("review_status", "confirmed"), person.get("status", "confirmed"),
@@ -1034,6 +1048,32 @@ def _load_family_generation_context(cursor, family_id: str) -> tuple[dict, list[
         "SELECT * FROM relations WHERE family_id = ?", (family_id,)
     ).fetchall()]
     return family, persons, relations
+
+
+def _resolve_generation_parse_context(cursor, data: dict | None) -> tuple[str, int]:
+    """从请求体或 family_id 解析世代规则，供 OCR/整理解析使用。"""
+    from agent.generation_model import family_generation_context, normalize_scheme
+
+    data = data or {}
+    scheme = data.get("generation_scheme")
+    offset = data.get("generation_epoch_offset")
+    family_id = (data.get("family_id") or "").strip()
+    if family_id and (scheme is None or offset is None):
+        row = cursor.execute(
+            "SELECT generation_scheme, generation_epoch_offset FROM families WHERE id = ?",
+            (family_id,),
+        ).fetchone()
+        if row:
+            fam = dict(row)
+            if scheme is None:
+                scheme = fam.get("generation_scheme")
+            if offset is None:
+                offset = fam.get("generation_epoch_offset")
+    ctx = family_generation_context({
+        "generation_scheme": normalize_scheme(scheme),
+        "generation_epoch_offset": offset,
+    })
+    return ctx["generation_scheme"], ctx["generation_epoch_offset"]
 
 
 def _persist_family_generations(cursor, family_id: str) -> dict:
@@ -1209,12 +1249,18 @@ async def update_family(family_id: str, data: dict):
     description = data.get("description")
     start_generation = data.get("start_generation")
     root_person_id = data.get("root_person_id")
+    generation_scheme = data.get("generation_scheme")
+    generation_epoch_offset = data.get("generation_epoch_offset")
 
     if start_generation is not None:
         start_generation = max(1, int(start_generation))
         recalc = True
     if root_person_id is not None:
         recalc = True
+    if generation_scheme is not None or generation_epoch_offset is not None:
+        recalc = True
+    if generation_epoch_offset is not None:
+        generation_epoch_offset = max(1, int(generation_epoch_offset))
 
     source_text = data.get("source_text")
     source_annotations = data.get("source_annotations")
@@ -1224,6 +1270,8 @@ async def update_family(family_id: str, data: dict):
     c.execute(
         """UPDATE families SET name=?, surname=?, description=?, start_generation=COALESCE(?, start_generation),
            root_person_id=COALESCE(?, root_person_id),
+           generation_scheme=COALESCE(?, generation_scheme),
+           generation_epoch_offset=COALESCE(?, generation_epoch_offset),
            source_text=COALESCE(?, source_text),
            source_annotations=COALESCE(?, source_annotations),
            updated_at=? WHERE id=?""",
@@ -1233,6 +1281,8 @@ async def update_family(family_id: str, data: dict):
             description,
             start_generation,
             root_person_id,
+            generation_scheme,
+            generation_epoch_offset,
             source_text,
             source_annotations,
             now,
@@ -1458,6 +1508,7 @@ async def preview_text_edition(family_id: str, data: dict | None = None):
 async def upload_family_source_image(family_id: str, data: dict):
     """为已有族谱添加或更换版本一 OCR 对照原图（不要求重新扫描）。"""
     image_b64 = data.get("image_base64") or data.get("image")
+    append = bool(data.get("append"))
     if not image_b64:
         raise HTTPException(status_code=400, detail="Missing image data")
 
@@ -1470,7 +1521,7 @@ async def upload_family_source_image(family_id: str, data: dict):
 
     try:
         filename, _ = save_upload_image(UPLOAD_DIR, image_b64)
-        version = attach_source_image(c, family_id, filename)
+        version = attach_source_image(c, family_id, filename, append=append)
     except ValueError as exc:
         conn.close()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1498,6 +1549,10 @@ async def save_ocr_pipeline_versions(family_id: str, data: dict):
         img_path = data.get("image_path")
         if img_path and str(img_path).lower().endswith(".pdf"):
             img_path = None
+        raw_paths = data.get("image_paths")
+        image_paths: list[str] | None = None
+        if isinstance(raw_paths, list) and raw_paths:
+            image_paths = [str(p).strip() for p in raw_paths if str(p).strip()]
         result = save_ocr_scan_versions(
             c,
             family_id,
@@ -1506,6 +1561,7 @@ async def save_ocr_pipeline_versions(family_id: str, data: dict):
             custom_text=data.get("custom_text") or "",
             source_annotations=data.get("source_annotations"),
             image_path=img_path,
+            image_paths=image_paths,
             pdf_path=data.get("pdf_path"),
             layout_hint=data.get("layout_hint") or "horizontal_ltr",
             active_kind=data.get("active_kind") or VERSION_KIND_RELATION_DESC,
@@ -1528,7 +1584,7 @@ async def regenerate_relation_description(
 ):
     """用 AI（+对话上下文+规则降级）从版本一 OCR 重新生成关系描述稿。"""
     data = data or {}
-    user_id = resolve_user_id(x_user_id)
+    user_id = resolve_request_user_id(x_user_id)
     conn = get_db()
     c = conn.cursor()
     family = c.execute("SELECT id FROM families WHERE id = ?", (family_id,)).fetchone()
@@ -1570,6 +1626,14 @@ async def regenerate_relation_description(
             credential_source=routed.get("source") if provider == parse_provider else "byok",
         )
 
+    page_raw = data.get("page")
+    page: int | None = None
+    if page_raw is not None:
+        try:
+            page = int(page_raw)
+        except (TypeError, ValueError):
+            page = None
+
     result = await regenerate_relation_desc(
         c,
         family_id,
@@ -1581,6 +1645,7 @@ async def regenerate_relation_description(
         context_notes=ctx.get("context_notes") or "",
         previous_draft=ctx.get("previous_draft") or "",
         allow_rule_fallback=bool(data.get("allow_rule_fallback", True)),
+        page=page if page and page > 0 else None,
     )
     if not result.get("success"):
         conn.close()
@@ -1617,6 +1682,92 @@ async def regenerate_relation_description(
         },
         **payload,
     }
+
+
+@app.post("/api/families/{family_id}/source-versions/regenerate-pipeline")
+async def regenerate_source_pipeline_api(
+    family_id: str,
+    data: dict | None = None,
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+):
+    """一键递进：按序 AI 重生版本一/二/三，并返回族谱解析预览。"""
+    data = data or {}
+    user_id = resolve_request_user_id(x_user_id)
+    conn = get_db()
+    c = conn.cursor()
+    family = c.execute("SELECT * FROM families WHERE id = ?", (family_id,)).fetchone()
+    if not family:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Family not found")
+
+    fam = dict(family)
+    gen_scheme, gen_offset = _resolve_generation_parse_context(c, data)
+
+    routed_ocr = resolve_routed_task(data, "ocr", user_id)
+    routed_parse = resolve_routed_task(data, "parse", user_id)
+    await apply_route_queue_wait(routed_ocr)
+    await apply_route_queue_wait(routed_parse)
+
+    ocr_provider = routed_ocr.get("provider") or ""
+    ocr_model = routed_ocr.get("model") or ""
+    parse_provider = routed_parse.get("provider") or ""
+    parse_model = routed_parse.get("model") or ""
+
+    from agent.regenerate_context import build_regenerate_context
+    from agent.source_regenerate import regenerate_source_pipeline
+
+    persons_rows = c.execute("SELECT name FROM persons WHERE family_id = ?", (family_id,)).fetchall()
+    ctx = build_regenerate_context(c, family_id, persons=[{"name": r["name"]} for r in persons_rows])
+    if (data.get("context_notes") or "").strip():
+        ctx["context_notes"] = (
+            (ctx.get("context_notes") or "") + "\n\n" + data["context_notes"].strip()
+        ).strip()
+
+    steps_raw = data.get("steps")
+    if isinstance(steps_raw, list):
+        steps = [str(s).strip() for s in steps_raw if str(s).strip()]
+    elif data.get("full"):
+        steps = ["ocr_raw", "relation_desc", "custom"]
+    elif data.get("from_ocr"):
+        steps = ["ocr_raw", "relation_desc"]
+    else:
+        steps = ["relation_desc", "custom"]
+
+    async def vision_fn(provider, model, img, prompt):
+        return await call_vision_model(provider, model, img, prompt)
+
+    async def text_fn(provider, model, prompt, max_tokens=8192):
+        return await call_text_model(
+            provider,
+            model,
+            prompt,
+            max_tokens=max_tokens,
+            credential_source=routed_parse.get("source") if provider == parse_provider else "byok",
+        )
+
+    result = await regenerate_source_pipeline(
+        c,
+        family_id,
+        UPLOAD_DIR,
+        steps=steps,
+        ocr_provider=ocr_provider,
+        ocr_model=ocr_model,
+        parse_provider=parse_provider,
+        parse_model=parse_model,
+        vision_fn=vision_fn,
+        text_fn=text_fn,
+        context_notes=ctx.get("context_notes") or "",
+        generation_scheme=gen_scheme,
+        generation_epoch_offset=gen_offset,
+    )
+    if not result.get("success"):
+        conn.close()
+        raise HTTPException(status_code=502, detail=result.get("error") or "递进生成失败")
+
+    conn.commit()
+    payload = list_source_versions(c, family_id)
+    conn.close()
+    return {"success": True, **result, **payload}
 
 
 @app.get("/api/families/{family_id}/source-versions/compare")
@@ -2387,7 +2538,7 @@ def _is_provider_configured(provider_id: str) -> bool:
 @app.get("/api/agent/status")
 async def agent_status(x_user_id: str | None = Header(default=None, alias="X-User-Id")):
     """族谱智能体状态：能力列表与 AI 是否就绪"""
-    user_id = resolve_user_id(x_user_id)
+    user_id = resolve_request_user_id(x_user_id)
     selection = load_ai_settings()
     ocr = selection["ocr"]
     parse_cfg = selection["parse"]
@@ -2425,7 +2576,19 @@ async def agent_generate(data: dict):
     family_id = data.get("family_id")
     persist = bool(data.get("persist"))
 
-    built = auto_build_genealogy(text, persons, relations, style=style)
+    conn = get_db()
+    c = conn.cursor()
+    gen_scheme, gen_offset = _resolve_generation_parse_context(c, data)
+    conn.close()
+
+    built = auto_build_genealogy(
+        text,
+        persons,
+        relations,
+        style=style,
+        generation_scheme=gen_scheme,
+        generation_epoch_offset=gen_offset,
+    )
     if not built.get("success"):
         return built
 
@@ -3504,7 +3667,7 @@ async def smart_suggest_family(family_id: str, data: dict | None = None):
     data = data or {}
     conn = get_db()
     c = conn.cursor()
-    family_row = c.execute("SELECT id FROM families WHERE id = ?", (family_id,)).fetchone()
+    family_row = c.execute("SELECT * FROM families WHERE id = ?", (family_id,)).fetchone()
     if not family_row:
         conn.close()
         raise HTTPException(status_code=404, detail="Family not found")
@@ -3526,6 +3689,10 @@ async def smart_suggest_family(family_id: str, data: dict | None = None):
     else:
         source_text, source_version = get_digitize_source_for_family(c, family_id)
         source_text = (source_text or "").strip()
+
+    fam = dict(family_row)
+    gen_scheme = fam.get("generation_scheme") or "absolute"
+    gen_offset = max(1, int(fam.get("generation_epoch_offset") or 1))
 
     conn.close()
 
@@ -3549,6 +3716,8 @@ async def smart_suggest_family(family_id: str, data: dict | None = None):
         source_text,
         source_version=source_version,
         style=data.get("style") or "su",
+        generation_scheme=gen_scheme,
+        generation_epoch_offset=gen_offset,
     )
     if not result.get("success"):
         return result
@@ -3829,7 +3998,7 @@ async def agent_scan_ocr(
     x_user_id: str | None = Header(default=None, alias="X-User-Id"),
 ):
     """扫描建谱 · 第一步：仅 OCR，返回版本一原文。"""
-    user_id = resolve_user_id(x_user_id)
+    user_id = resolve_request_user_id(x_user_id)
     image_raw = data.get("image")
     if not image_raw:
         raise HTTPException(status_code=400, detail="Missing image data")
@@ -3901,7 +4070,7 @@ async def agent_pdf_scan_ocr(
     x_user_id: str | None = Header(default=None, alias="X-User-Id"),
 ):
     """多页 PDF：逐页转图 → OCR → 合并为版本一原文（带页码分隔）。"""
-    user_id = resolve_user_id(x_user_id)
+    user_id = resolve_request_user_id(x_user_id)
     raw = data.get("pdf") or data.get("file")
     if not raw:
         raise HTTPException(status_code=400, detail="缺少 PDF 数据")
@@ -3968,13 +4137,83 @@ async def agent_pdf_scan_ocr(
     return result
 
 
+@app.post("/api/agent/batch/scan-ocr")
+async def agent_batch_scan_ocr(
+    data: dict,
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+):
+    """多张族谱照片：逐张 OCR → 合并为版本一原文（带页码分隔）。"""
+    user_id = resolve_request_user_id(x_user_id)
+    raw_images = data.get("images") or data.get("image_list") or []
+    if not isinstance(raw_images, list) or not raw_images:
+        raise HTTPException(status_code=400, detail="缺少 images 数组")
+
+    from image_upload import normalize_image_base64
+
+    images_base64: list[str] = []
+    for idx, raw in enumerate(raw_images):
+        try:
+            images_base64.append(normalize_image_base64(str(raw)))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"第 {idx + 1} 张图片无效：{exc}") from exc
+
+    routed = resolve_routed_task(data, "ocr", user_id)
+    ocr_provider = routed.get("provider") or ""
+    ocr_model = routed.get("model") or ""
+    if not ocr_provider:
+        raise HTTPException(
+            status_code=503,
+            detail=routed.get("error_hint") or "暂无可用 OCR 模型",
+        )
+    await apply_route_queue_wait(routed)
+    cred_source = routed.get("source") or "byok"
+
+    async def ocr_fn(provider, model, img, prompt):
+        return await call_vision_model(
+            provider, model, img, prompt, credential_source=cred_source
+        )
+
+    result = await run_batch_ocr_pipeline(
+        images_base64,
+        ocr_provider=ocr_provider,
+        ocr_model=ocr_model,
+        ocr_fn=ocr_fn,
+    )
+
+    if result.get("success"):
+        record_routed_usage(
+            user_id,
+            "ocr",
+            routed,
+            count=max(1, result.get("pages_recognized") or 1),
+        )
+        result["routing"] = {
+            "source": routed.get("source"),
+            "tier": routed.get("tier"),
+            "label": routed.get("label"),
+        }
+        image_paths: list[str] = []
+        for img_b64 in images_base64:
+            try:
+                fname, _ = save_upload_image(UPLOAD_DIR, img_b64)
+                image_paths.append(fname)
+            except ValueError:
+                continue
+        if image_paths:
+            result["image_paths"] = image_paths
+            result["image_path"] = image_paths[0]
+            if len(image_paths) > 1:
+                result["image_path_note"] = f"共 {len(image_paths)} 张，预览为首图"
+    return result
+
+
 @app.post("/api/agent/scan")
 async def agent_scan(
     data: dict,
     x_user_id: str | None = Header(default=None, alias="X-User-Id"),
 ):
     """扫描建谱流水线：OCR → 解析 → 校验"""
-    user_id = resolve_user_id(x_user_id)
+    user_id = resolve_request_user_id(x_user_id)
     image_base64 = data.get("image")
     ocr_routed = resolve_routed_task(data, "ocr", user_id)
     parse_routed = resolve_routed_task(data, "parse", user_id)
@@ -4028,7 +4267,7 @@ async def ocr_recognize(
     x_user_id: str | None = Header(default=None, alias="X-User-Id"),
 ):
     """OCR文字识别"""
-    user_id = resolve_user_id(x_user_id)
+    user_id = resolve_request_user_id(x_user_id)
     image_raw = data.get("image")
     if not image_raw:
         raise HTTPException(status_code=400, detail="Missing image data")
@@ -4129,6 +4368,11 @@ async def ocr_parse(data: dict):
     skip_describe = bool(data.get("skip_describe"))
     relation_override = (data.get("relation_text") or "").strip() or None
 
+    conn = get_db()
+    c = conn.cursor()
+    gen_scheme, gen_offset = _resolve_generation_parse_context(c, data)
+    conn.close()
+
     async def parse_fn(prompt: str) -> tuple[str, str]:
         return await call_text_model(parse_provider, parse_model, prompt, max_tokens=8192)
 
@@ -4137,6 +4381,8 @@ async def ocr_parse(data: dict):
         parse_fn,
         skip_describe=skip_describe or bool(relation_override),
         relation_text_override=relation_override,
+        generation_scheme=gen_scheme,
+        generation_epoch_offset=gen_offset,
     )
 
     out = {
@@ -4755,4 +5001,5 @@ if __name__ == "__main__":
         print("  然后再运行：python main.py")
         sys.exit(1)
 
+    print(f"族见后端 http://127.0.0.1:{port} 已就绪（改代码后请 Ctrl+C 重启，Windows 默认不热重载）")
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=use_reload)

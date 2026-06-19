@@ -9,6 +9,7 @@ from .genealogy_prompts import build_digitize_prompt, build_relation_describe_pr
 from .name_extractor import refine_persons_list, score_name_confidence
 from .parser import extract_json_content, parse_genealogy_text
 from .review import annotate_persons_for_review, annotate_relations_for_review
+from .relation_text import clean_relation_description
 from .validators import validate_genealogy_persons, validate_relations
 
 ParseFn = Callable[[str], Awaitable[tuple[str, str]]]
@@ -20,6 +21,8 @@ async def run_two_stage_genealogy_parse(
     *,
     skip_describe: bool = False,
     relation_text_override: str | None = None,
+    generation_scheme: str = "absolute",
+    generation_epoch_offset: int = 1,
 ) -> dict[str, Any]:
     """两阶段解析族谱文字，返回人物、关系及中间关系描述稿。"""
     raw_text = (raw_text or "").strip()
@@ -50,7 +53,7 @@ async def run_two_stage_genealogy_parse(
         parse_steps.append("describe")
         prompt1 = build_relation_describe_prompt(raw_text)
         content1, err1 = await parse_fn(prompt1)
-        cleaned1 = (content1 or "").strip()
+        cleaned1 = clean_relation_description(content1 or "")
         if cleaned1 and len(cleaned1) >= 4:
             relation_description = cleaned1
             relation_text = cleaned1
@@ -65,7 +68,11 @@ async def run_two_stage_genealogy_parse(
     if parsed:
         used_ai_digitize = True
     else:
-        parsed = parse_genealogy_text(relation_text or raw_text)
+        parsed = parse_genealogy_text(
+            relation_text or raw_text,
+            generation_scheme=generation_scheme,
+            generation_epoch_offset=generation_epoch_offset,
+        )
         if err2:
             digitize_warning = f"AI 数字化失败，已用本地规则：{err2}"
         else:

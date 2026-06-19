@@ -868,6 +868,83 @@ select.input { cursor: pointer; }
 }
 .ocr-step-dot.active { background: var(--color-primary); }
 .ocr-step-dot.done { background: var(--color-accent); }
+
+.ocr-pipeline-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.ocr-pipeline-step {
+  flex: 1;
+  min-width: 120px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg);
+  font-size: 13px;
+  cursor: pointer;
+  text-align: center;
+  transition: border-color 0.15s, background 0.15s;
+}
+.ocr-pipeline-step:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.ocr-pipeline-step.active {
+  border-color: var(--color-primary);
+  background: rgba(139, 111, 71, 0.08);
+  font-weight: 600;
+}
+.ocr-pipeline-step.done:not(.active) {
+  border-color: var(--color-accent);
+}
+.ocr-pipeline-hint {
+  margin: 0 0 16px;
+}
+.ocr-batch-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
+  gap: 8px;
+  width: 100%;
+  padding: 12px;
+}
+.ocr-batch-thumb {
+  width: 100%;
+  aspect-ratio: 3/4;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+}
+.ocr-batch-more {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 3/4;
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-subtle, rgba(0, 0, 0, 0.04));
+  font-size: 14px;
+  color: var(--color-text-muted);
+}
+.ocr-graph-preview-wrap {
+  min-height: 280px;
+  max-height: 420px;
+  margin-bottom: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: var(--color-bg);
+}
+.ocr-v3-preview {
+  min-height: 280px;
+  margin-top: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+.ocr-upload-count {
+  margin: 0 0 8px;
+}
 .ocr-container {
   background: var(--color-bg-elevated);
   border-radius: var(--radius-lg);
@@ -1145,10 +1222,43 @@ select.input { cursor: pointer; }
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 12px;
-  min-height: 320px;
+  min-height: 0;
+}
+.source-text-pair--baseline-collapsed {
+  grid-template-columns: 1fr;
+}
+.source-text-pair-toolbar {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.source-text-pair-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-primary);
+  background: #fff;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.source-text-pair-toggle:hover {
+  border-color: var(--color-primary);
+  background: #f8f4ee;
+}
+.source-text-pair-toggle-meta {
+  font-weight: 500;
+  color: var(--color-text-muted);
 }
 @media (max-width: 768px) {
-  .source-text-pair { grid-template-columns: 1fr; }
+  .source-text-pair,
+  .source-text-pair--baseline-open {
+    grid-template-columns: 1fr;
+  }
 }
 .source-text-pair-col {
   display: flex;
@@ -1178,7 +1288,8 @@ select.input { cursor: pointer; }
 }
 .source-text-pair-editor {
   flex: 1;
-  min-height: 320px;
+  min-height: 220px;
+  max-height: min(52vh, 520px);
   border: none;
   padding: 12px;
   resize: vertical;
@@ -1270,12 +1381,18 @@ select.input { cursor: pointer; }
   gap: 8px;
 }
 .ocr-pair-split {
-  display: grid;
-  grid-template-columns: minmax(320px, 1.35fr) minmax(280px, 1fr);
-  gap: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
   align-items: stretch;
   flex: 1;
-  min-height: 480px;
+  min-height: 0;
+}
+.ocr-pair-split--image-open {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) minmax(280px, 1fr);
+  gap: 14px;
+  align-items: start;
 }
 .ocr-pair-editor {
   display: flex;
@@ -1376,6 +1493,436 @@ select.input { cursor: pointer; }
   color: rgba(255, 255, 255, 0.55);
   background: #252525;
 }
+.source-image-zoom--compact .source-image-zoom-viewport {
+  min-height: 200px;
+  max-height: min(42vh, 360px);
+}
+.source-image-zoom--compact .source-image-zoom-empty {
+  min-height: 120px;
+}
+
+.source-image-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  min-width: 0;
+}
+.source-image-panel-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-sm);
+  background: rgba(139, 111, 71, 0.05);
+}
+.source-image-panel--expanded .source-image-panel-bar {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+  border-bottom: none;
+}
+.source-image-panel-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-primary);
+  background: #fff;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.source-image-panel-toggle:hover {
+  border-color: var(--color-primary);
+  background: #f8f4ee;
+}
+.source-image-panel-toggle-icon {
+  font-size: 11px;
+  opacity: 0.75;
+}
+.source-image-panel-count {
+  font-weight: 500;
+  color: var(--color-text-muted);
+}
+.source-image-panel-label {
+  font-size: 13px;
+  font-weight: 600;
+}
+.source-image-panel-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-left: auto;
+}
+.source-image-panel-tab {
+  padding: 3px 8px;
+  font-size: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: #fff;
+  cursor: pointer;
+  color: var(--color-text-muted);
+}
+.source-image-panel-tab.active {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+  background: #f0f7ff;
+  font-weight: 600;
+}
+.source-image-panel--multi .source-image-panel-tabs {
+  flex: 1 1 auto;
+  justify-content: flex-end;
+}
+.genealogy-page-workbench {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+}
+.genealogy-page-workbench-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.genealogy-page-workbench-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 12px;
+  font-size: 13px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: #fff;
+  cursor: pointer;
+}
+.genealogy-page-workbench-tab.active {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+  background: #f0f7ff;
+  font-weight: 600;
+}
+.genealogy-page-workbench-tab-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #6a9e6a;
+}
+.genealogy-page-workbench-tab-dot--rel {
+  background: var(--color-primary);
+}
+.genealogy-page-workbench-split {
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) minmax(300px, 1.1fr);
+  gap: 12px;
+  align-items: stretch;
+  min-height: 320px;
+}
+.genealogy-page-workbench-image,
+.genealogy-page-workbench-text,
+.genealogy-page-workbench-left-ocr {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: #fff;
+}
+.genealogy-page-workbench-split--text {
+  /* 版本二：双栏文字对照，列宽更均衡 */
+  grid-template-columns: minmax(260px, 1fr) minmax(260px, 1fr);
+}
+.genealogy-page-workbench-left-ocr .genealogy-page-workbench-baseline-body--pane {
+  flex: 1;
+  margin: 0;
+  min-height: 240px;
+  max-height: min(50vh, 480px);
+  overflow: auto;
+  padding: 12px;
+  font-size: 13px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  background: #faf8f5;
+  color: var(--color-text);
+}
+.genealogy-page-workbench-image-head,
+.genealogy-page-workbench-text-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  background: rgba(139, 111, 71, 0.08);
+  border-bottom: 1px solid var(--color-border);
+}
+.genealogy-page-workbench-image .source-image-zoom {
+  border: none;
+  border-radius: 0;
+  flex: 1;
+}
+.genealogy-page-workbench-image-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  font-size: 13px;
+  color: var(--color-text-muted);
+  text-align: center;
+}
+.genealogy-page-workbench-baseline {
+  border-bottom: 1px dashed var(--color-border);
+}
+.genealogy-page-workbench-baseline-toggle {
+  width: 100%;
+  text-align: left;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-primary);
+  background: rgba(139, 111, 71, 0.04);
+  border: none;
+  cursor: pointer;
+}
+.genealogy-page-workbench-baseline-body {
+  margin: 0;
+  padding: 8px 10px;
+  max-height: 120px;
+  overflow: auto;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  background: #faf8f5;
+}
+.genealogy-page-workbench-editor {
+  flex: 1;
+  min-height: 240px;
+  max-height: min(50vh, 480px);
+  border: none;
+  padding: 12px;
+  resize: vertical;
+  font-size: 13px;
+  line-height: 1.65;
+  font-family: ui-monospace, "PingFang SC", sans-serif;
+}
+.genealogy-page-workbench-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--color-border);
+}
+.genealogy-page-workbench-foot {
+  margin: 0;
+}
+
+.genealogy-page-workbench--image-primary {
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.genealogy-page-workbench-stack {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.genealogy-page-workbench-image--hero {
+  flex: 1 1 auto;
+  min-height: min(52vh, 640px);
+  display: flex;
+  flex-direction: column;
+}
+
+.genealogy-page-workbench-image--hero .source-image-zoom {
+  flex: 1;
+  min-height: 0;
+}
+
+.genealogy-page-workbench-image--hero .source-image-zoom-viewport {
+  min-height: 0;
+  max-height: none;
+  flex: 1;
+}
+
+.genealogy-page-workbench-text--dock {
+  flex: 0 0 auto;
+  max-height: min(30vh, 300px);
+}
+
+.genealogy-page-workbench-text--dock .genealogy-page-workbench-editor {
+  min-height: 100px;
+  max-height: min(24vh, 220px);
+}
+
+.genealogy-page-workbench-split--under-image {
+  flex: 0 0 auto;
+  min-height: min(32vh, 320px);
+  max-height: min(38vh, 380px);
+}
+
+.genealogy-page-workbench-split--under-image .genealogy-page-workbench-baseline-body--pane,
+.genealogy-page-workbench-split--under-image .genealogy-page-workbench-editor {
+  min-height: 120px;
+  max-height: min(28vh, 260px);
+}
+
+.organize-workspace-pane--v1 .organize-workspace-col-body,
+.organize-workspace-pane--v2 .organize-workspace-col-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 0 8px 8px;
+  overflow: hidden;
+}
+
+.organize-workspace-pane--v1 .genealogy-page-workbench,
+.organize-workspace-pane--v2 .genealogy-page-workbench {
+  flex: 1;
+  min-height: 0;
+}
+
+.organize-workspace-aux {
+  flex-shrink: 0;
+  margin: 0 8px 6px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-muted);
+}
+
+.organize-workspace-aux > summary {
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.organize-workspace-aux > summary::-webkit-details-marker {
+  display: none;
+}
+
+.organize-workspace-aux[open] > summary {
+  border-bottom: 1px solid var(--color-border);
+}
+
+.organize-workspace-aux-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+}
+
+.family-generation-rules {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  background: rgba(139, 111, 71, 0.04);
+  margin-bottom: 10px;
+}
+.family-generation-rules--compact {
+  padding: 8px 10px;
+}
+.family-generation-rules-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.family-generation-rules-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.family-generation-rules-field {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.family-generation-rules-offset {
+  width: 4.5em;
+  text-align: center;
+}
+.family-generation-rules-tip {
+  margin: 0;
+  font-size: 12px;
+}
+.family-generation-rules-tip code {
+  font-size: 11px;
+}
+.family-generation-rules-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.source-pipeline-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: linear-gradient(180deg, #faf8f5 0%, #fff 100%);
+}
+.source-pipeline-bar--compact {
+  padding: 8px 10px;
+}
+.source-pipeline-bar-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+}
+.source-pipeline-bar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.source-pipeline-bar-sep {
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+.source-pipeline-bar-pipeline {
+  font-weight: 600;
+}
+.source-pipeline-bar-status {
+  margin: 0;
+  font-size: 12px;
+  color: var(--color-primary);
+}
+
+@media (max-width: 900px) {
+  .genealogy-page-workbench-split {
+    grid-template-columns: 1fr;
+  }
+}
+
+.source-image-panel-body {
+  min-width: 0;
+}
+.source-image-panel--expanded .source-image-panel-body .source-image-zoom {
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
 
 @media (min-width: 1024px) {
   .ocr-text-drawer,
@@ -1383,14 +1930,13 @@ select.input { cursor: pointer; }
     max-height: min(90vh, 980px);
   }
   .ocr-text-workspace--pair.compact {
-    min-height: 640px;
+    min-height: 0;
   }
-  .ocr-pair-split {
-    grid-template-columns: minmax(420px, 1.6fr) minmax(320px, 1fr);
-    min-height: 560px;
+  .ocr-pair-split--image-open {
+    grid-template-columns: minmax(300px, 1fr) minmax(320px, 1fr);
   }
-  .source-image-zoom-viewport {
-    min-height: 520px;
+  .source-image-zoom:not(.source-image-zoom--compact) .source-image-zoom-viewport {
+    min-height: 360px;
   }
 }
 
@@ -2011,17 +2557,103 @@ select.input { cursor: pointer; }
 .workspace-body {
   flex: 1;
   display: grid;
-  grid-template-columns: 240px 1fr 300px;
+  grid-template-columns: 1fr;
   min-height: 0;
   overflow: hidden;
+  position: relative;
 }
 
-.workspace-nav {
-  border-right: 1px solid var(--color-border);
-  background: var(--color-bg-muted);
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
+.workspace-body--focus {
+  grid-template-columns: 1fr;
+}
+
+.workspace-side-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 24;
+  background: rgba(74, 63, 53, 0.22);
+}
+
+.workspace-side-backdrop--nav {
+  z-index: 26;
+}
+
+.workspace-side-backdrop--detail {
+  z-index: 26;
+}
+
+.workspace-flyout-close {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.workspace-flyout-close:hover {
+  background: rgba(139, 111, 71, 0.12);
+  color: var(--color-text);
+}
+
+.workspace-flyout-close--desktop {
+  display: none;
+}
+
+.toolbar-panel-toggle {
+  display: none;
+}
+
+@media (min-width: 961px) {
+  .toolbar-panel-toggle {
+    display: inline-flex;
+  }
+
+  .workspace-flyout-close--desktop {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .workspace-nav--desktop-hidden:not(.workspace-nav--flyout) {
+    display: none;
+  }
+
+  .workspace-nav--flyout {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: min(280px, 34vw);
+    z-index: 28;
+    box-shadow: 4px 0 28px rgba(74, 63, 53, 0.16);
+  }
+
+  .workspace-detail--flyout {
+    position: absolute;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    width: min(320px, 36vw);
+    z-index: 28;
+    box-shadow: -4px 0 28px rgba(74, 63, 53, 0.16);
+  }
+
+  .workspace-canvas--full {
+    grid-column: 1 / -1;
+    min-width: 0;
+  }
+
+  .workspace-canvas--full .genealogy-reference-view--fill,
+  .workspace-canvas--full .ref-graph-host,
+  .workspace-canvas--full .ref-zoom-viewport {
+    flex: 1;
+    min-height: 0;
+  }
 }
 
 .workspace-nav-header {
@@ -2032,6 +2664,70 @@ select.input { cursor: pointer; }
   text-transform: uppercase;
   letter-spacing: 0.06em;
   border-bottom: 1px solid var(--color-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 42px;
+}
+
+.workspace-nav-header-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.workspace-panel-toggle {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: #fff;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.workspace-panel-toggle:hover {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+.workspace-panel-toggle--toolbar {
+  margin-left: auto;
+}
+
+.canvas-toolbar-collapsed {
+  flex-shrink: 0;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-bg-elevated);
+}
+
+.canvas-toolbar-collapsed-toggle {
+  width: 100%;
+  text-align: left;
+  padding: 6px 8px;
+  border: none;
+  background: transparent;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-primary);
+  cursor: pointer;
+}
+
+.canvas-toolbar-collapsed-toggle:hover {
+  background: rgba(139, 111, 71, 0.08);
+  border-radius: var(--radius-sm);
+}
+
+.workspace-nav {
+  border-right: 1px solid var(--color-border);
+  background: var(--color-bg-muted);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .workspace-nav-list {
@@ -2675,7 +3371,28 @@ select.input { cursor: pointer; }
 
 @media (max-width: 960px) {
   .workspace-body {
-    grid-template-columns: 200px 1fr;
+    grid-template-columns: 1fr;
+    min-height: 0;
+  }
+  .workspace-nav {
+    max-height: 0;
+    overflow: hidden;
+    border-right: none;
+    border-bottom: none;
+    transition: max-height 0.25s ease;
+  }
+  .workspace-nav.nav-mobile-open {
+    max-height: min(36dvh, 280px);
+    border-bottom: 1px solid var(--color-border);
+  }
+  .workspace-nav--flyout {
+    position: static;
+    width: auto;
+    box-shadow: none;
+  }
+  .workspace-side-backdrop--nav,
+  .workspace-side-backdrop--detail {
+    display: none;
   }
   .workspace-detail {
     display: none;
@@ -3996,6 +4713,16 @@ select.input { cursor: pointer; }
   margin-bottom: 10px;
 }
 
+.source-drawer-intro {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  background: rgba(139, 111, 71, 0.06);
+  border-radius: var(--radius-sm);
+  border-left: 3px solid var(--color-accent, #8b6914);
+}
+
 .source-drawer-hint {
   margin: 0 0 8px;
   font-size: 12px;
@@ -4456,40 +5183,25 @@ select.input { cursor: pointer; }
 .agent-tree-node .node-gen { font-size: 11px; color: var(--color-text-muted); }
 .agent-source-text { width: 100%; min-height: 200px; font-size: 13px; }
 .agent-source-pair {
-  display: grid;
-  grid-template-columns: minmax(240px, 1.2fr) minmax(200px, 1fr);
-  gap: 12px;
-  align-items: stretch;
-  min-height: 320px;
-}
-.agent-source-pair-image {
-  min-height: 280px;
-  min-width: 0;
-}
-.agent-source-pair-image .source-image-zoom {
-  height: 100%;
-  min-height: 280px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
 }
 .agent-source-pair-text {
   display: flex;
   flex-direction: column;
   gap: 6px;
   min-width: 0;
+  flex: 1;
 }
-.agent-source-pair-label { margin: 0; }
 .agent-source-text--pair {
   flex: 1;
-  min-height: 240px;
+  min-height: 200px;
+  max-height: min(50vh, 480px);
   resize: vertical;
 }
-@media (max-width: 768px) {
-  .agent-source-pair {
-    grid-template-columns: 1fr;
-  }
-  .agent-source-pair-image .source-image-zoom {
-    min-height: 220px;
-  }
-}
+.agent-source-pair-label { margin: 0; }
 
 .agent-workspace-header--tree {
   flex-wrap: wrap;

@@ -25,6 +25,7 @@ export type GenealogyUiHandlers = {
   openSettings?: () => void
   openScan?: () => void
   organizeRegenerate?: (target: string, synced?: boolean) => void | Promise<void>
+  organizePipeline?: (opts?: { full?: boolean; fromOcr?: boolean }) => void | Promise<void>
   selectFamily?: (familyId: string) => void
   scan?: () => void
   createFamily?: () => void
@@ -54,8 +55,11 @@ export function describeUiAction(action: AgentUiAction): string | null {
   if (action.type === 'scan') return '打开扫描建谱'
   if (action.type === 'create_family') return '新建族谱'
   if (action.type === 'organize_regenerate') {
-    return action.target === 'ocr_raw' ? '正在重新识别版本一…' : '正在重新生成关系描述…'
+    if (action.target === 'ocr_raw') return '正在重新识别版本一…'
+    if (action.target === 'custom') return '正在重新生成版本三修正稿…'
+    return '正在重新生成版本二关系描述…'
   }
+  if (action.type === 'organize_pipeline') return '正在递进生成各版本并预览族谱…'
   return null
 }
 
@@ -81,6 +85,9 @@ export function applyGenealogyUiActions(
     if (a.type === 'open_scan') handlers.openScan?.()
     if (a.type === 'organize_regenerate' && a.target) {
       void handlers.organizeRegenerate?.(a.target, Boolean(a.synced))
+    }
+    if (a.type === 'organize_pipeline') {
+      void handlers.organizePipeline?.({ full: a.full !== false, fromOcr: false })
     }
     if (a.type === 'select_family' && a.family_id) handlers.selectFamily?.(a.family_id)
     if (a.type === 'scan') handlers.scan?.()

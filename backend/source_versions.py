@@ -24,6 +24,7 @@ TEXT_EDITION_NOTE_PREFIX = "text_from:"
 DERIVED_FROM_NOTE_PREFIX = "derived_from:"
 LAYOUT_NOTE_PREFIX = "layout:"
 IMAGE_NOTE_PREFIX = "image:"
+IMAGES_NOTE_PREFIX = "images:"
 PDF_NOTE_PREFIX = "pdf:"
 
 VALID_SOURCE_LAYOUTS = frozenset({"horizontal_ltr", "horizontal_rtl", "vertical_rl", "prose"})
@@ -35,6 +36,7 @@ def parse_version_note(note: str | None) -> dict[str, str | None]:
     out: dict[str, str | None] = {
         "layout": DEFAULT_SOURCE_LAYOUT,
         "image_path": None,
+        "image_paths": [],
         "pdf_path": None,
         "derived_from": None,
     }
@@ -46,12 +48,24 @@ def parse_version_note(note: str | None) -> dict[str, str | None]:
             layout = token[len(LAYOUT_NOTE_PREFIX):].strip()
             if layout in VALID_SOURCE_LAYOUTS:
                 out["layout"] = layout
+        elif token.startswith(IMAGES_NOTE_PREFIX):
+            raw = token[len(IMAGES_NOTE_PREFIX):].strip()
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, list):
+                    out["image_paths"] = [str(p).strip() for p in parsed if str(p).strip()]
+            except json.JSONDecodeError:
+                pass
         elif token.startswith(IMAGE_NOTE_PREFIX):
             out["image_path"] = token[len(IMAGE_NOTE_PREFIX):].strip() or None
         elif token.startswith(PDF_NOTE_PREFIX):
             out["pdf_path"] = token[len(PDF_NOTE_PREFIX):].strip() or None
         elif token.startswith(DERIVED_FROM_NOTE_PREFIX):
             out["derived_from"] = token[len(DERIVED_FROM_NOTE_PREFIX):].strip() or None
+    if out.get("image_paths") and not out.get("image_path"):
+        out["image_path"] = out["image_paths"][0]
+    elif out.get("image_path") and not out.get("image_paths"):
+        out["image_paths"] = [out["image_path"]]
     return out
 
 
@@ -60,20 +74,29 @@ def merge_version_note(
     *,
     layout: str | None = None,
     image_path: str | None = None,
+    image_paths: list[str] | None = None,
     pdf_path: str | None = None,
 ) -> str | None:
     """合并 note 字段，保留未覆盖的既有信息。"""
     parsed = parse_version_note(note)
     if layout and layout in VALID_SOURCE_LAYOUTS:
         parsed["layout"] = layout
-    if image_path is not None:
+    if image_paths is not None:
+        cleaned = [p.strip() for p in image_paths if (p or "").strip()]
+        parsed["image_paths"] = cleaned
+        parsed["image_path"] = cleaned[0] if cleaned else None
+    elif image_path is not None:
         val = (image_path or "").strip()
         parsed["image_path"] = val if val and not val.lower().endswith(".pdf") else None
+        parsed["image_paths"] = [parsed["image_path"]] if parsed["image_path"] else []
     if pdf_path is not None:
         parsed["pdf_path"] = pdf_path or None
 
     parts: list[str] = []
-    if parsed.get("image_path"):
+    paths = parsed.get("image_paths") or []
+    if isinstance(paths, list) and len(paths) > 1:
+        parts.append(f"{IMAGES_NOTE_PREFIX}{json.dumps(paths, ensure_ascii=False)}")
+    elif parsed.get("image_path"):
         parts.append(f"{IMAGE_NOTE_PREFIX}{parsed['image_path']}")
     if parsed.get("pdf_path"):
         parts.append(f"{PDF_NOTE_PREFIX}{parsed['pdf_path']}")
@@ -117,6 +140,10 @@ def _row_to_version(row: sqlite3.Row | dict) -> dict:
     if img and str(img).lower().endswith(".pdf"):
         img = None
     data["image_path"] = img
+    paths = note_meta.get("image_paths") or []
+    if not paths and img:
+        paths = [img]
+    data["image_paths"] = [p for p in paths if p and not str(p).lower().endswith(".pdf")]
     data["pdf_path"] = note_meta.get("pdf_path")
     return data
 
@@ -387,13 +414,21 @@ def attach_source_image(
     cursor: sqlite3.Cursor,
     family_id: str,
     image_path: str,
+    *,
+    append: bool = False,
 ) -> dict:
     """为已有族谱挂上扫描原图（写入版本一 OCR 原文；无则自动创建该版）。"""
     migrate_legacy_family_source(cursor, family_id)
     v1 = find_version_by_kind(cursor, family_id, VERSION_KIND_OCR_RAW)
-    note = merge_version_note(v1.get("note") if v1 else None, image_path=image_path)
+    existing_note = v1.get("note") if v1 else None
+    meta = parse_version_note(existing_note)
+    existing_paths = list(meta.get("image_paths") or [])
+    if append and existing_paths:
+        note = merge_version_note(existing_note, image_paths=[*existing_paths, image_path])
+    else:
+        note = merge_version_note(existing_note, image_path=image_path)
     if v1:
-        updated = update_source_version(cursor, family_id, v1["id"], image_path=image_path)
+        updated = update_source_version(cursor, family_id, v1["id"], note=note)
         if not updated:
             raise ValueError("无法更新版本一原文")
         return updated
@@ -496,6 +531,7 @@ def save_ocr_scan_versions(
     custom_text: str = "",
     source_annotations: Any = None,
     image_path: str | None = None,
+    image_paths: list[str] | None = None,
     pdf_path: str | None = None,
     layout_hint: str = DEFAULT_SOURCE_LAYOUT,
     active_kind: str = VERSION_KIND_RELATION_DESC,
@@ -511,12 +547,18 @@ def save_ocr_scan_versions(
     if img.lower().endswith(".pdf"):
         img = ""
     pdf = (pdf_path or "").strip()
+    paths: list[str] = []
+    if image_paths:
+        paths = [p.strip() for p in image_paths if (p or "").strip() and not str(p).lower().endswith(".pdf")]
+    if not paths and img:
+        paths = [img]
 
     v1 = find_version_by_kind(cursor, family_id, VERSION_KIND_OCR_RAW)
     note_v1 = merge_version_note(
         v1.get("note") if v1 else None,
         layout=layout_hint if layout_hint in VALID_SOURCE_LAYOUTS else DEFAULT_SOURCE_LAYOUT,
-        image_path=img or None,
+        image_path=paths[0] if paths else None,
+        image_paths=paths or None,
         pdf_path=pdf or None,
     )
     if ocr:

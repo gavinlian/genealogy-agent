@@ -5,10 +5,13 @@ const props = withDefaults(
   defineProps<{
     src?: string
     alt?: string
+    /** 紧凑模式：降低默认视口高度，适合嵌入对照区 */
+    compact?: boolean
   }>(),
   {
     src: '',
     alt: '扫描原图',
+    compact: false,
   },
 )
 
@@ -163,7 +166,7 @@ defineExpose({ zoomIn, zoomOut, zoomReset, fitView, scale })
 </script>
 
 <template>
-  <div class="source-image-zoom">
+  <div class="source-image-zoom" :class="{ 'source-image-zoom--compact': compact }">
     <div class="source-image-zoom-toolbar">
       <span class="source-image-zoom-label">扫描原图</span>
       <span class="source-image-zoom-scale">{{ Math.round(scale * 100) }}%</span>

@@ -78,6 +78,31 @@ def test_parse_version_note_layout_and_image():
     parsed = parse_version_note(note)
     assert parsed["layout"] == "vertical_rl"
     assert parsed["image_path"] == "abc.jpg"
+    assert parsed["image_paths"] == ["abc.jpg"]
+
+
+def test_parse_version_note_multiple_images():
+    from source_versions import merge_version_note, parse_version_note
+
+    note = merge_version_note(None, image_paths=["a.jpg", "b.jpg", "c.jpg"])
+    assert "images:" in note
+    parsed = parse_version_note(note)
+    assert parsed["image_path"] == "a.jpg"
+    assert parsed["image_paths"] == ["a.jpg", "b.jpg", "c.jpg"]
+
+
+def test_attach_source_image_append_paths():
+    from source_versions import VERSION_KIND_OCR_RAW, attach_source_image, find_version_by_kind
+
+    conn = _mem_db()
+    c = conn.cursor()
+    attach_source_image(c, "f1", "page1.jpg")
+    attach_source_image(c, "f1", "page2.jpg", append=True)
+    conn.commit()
+    v1 = find_version_by_kind(c, "f1", VERSION_KIND_OCR_RAW)
+    assert v1
+    assert v1.get("image_paths") == ["page1.jpg", "page2.jpg"]
+    assert v1.get("image_path") == "page1.jpg"
 
 
 def test_save_ocr_scan_versions_with_layout():

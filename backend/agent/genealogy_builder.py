@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .generation_model import apply_generation_model_to_persons, strip_canonical_generation_tag
 from .name_extractor import (
     extract_names_from_line,
     is_valid_person_name,
@@ -93,8 +94,13 @@ def _extract_person_from_line(line: str, default_gen: int) -> list[dict]:
     return found
 
 
-def parse_genealogy_text_enhanced(text: str) -> dict:
-    """增强版本地解析：世代 + 行内关系 + 父子链"""
+def parse_genealogy_text_enhanced(
+    text: str,
+    *,
+    generation_scheme: str = "absolute",
+    generation_epoch_offset: int = 1,
+) -> dict:
+    """增强版本地解析：世代 + 行内关系 + 父子链；支持 [全世N] 与支谱 offset。"""
     persons: list[dict] = []
     relations: list[dict] = []
     generation = 1
@@ -103,8 +109,10 @@ def parse_genealogy_text_enhanced(text: str) -> dict:
 
     for raw_line in text.strip().split("\n"):
         line = raw_line.strip()
-        if not line:
+        if not line or line.startswith("====="):
             continue
+
+        line, canonical_override = strip_canonical_generation_tag(line)
 
         gen_from_line = _parse_generation_from_line(line)
         if gen_from_line is not None:
@@ -120,6 +128,8 @@ def parse_genealogy_text_enhanced(text: str) -> dict:
         if any(kw in line for kw in ["族谱", "碑记", "序言"]) and len(line) <= 8:
             continue
 
+        source_gen = generation
+
         wife_only = re.match(r"^配\s*([\u4e00-\u9fff]{2,4})", line)
         if wife_only:
             spouse_name = normalize_person_name(wife_only.group(1))
@@ -127,10 +137,12 @@ def parse_genealogy_text_enhanced(text: str) -> dict:
                 continue
             parent_name = last_main_by_gen.get(generation)
             if parent_name:
+                gen_val = canonical_override if canonical_override is not None else generation
                 persons.append({
                     "name": spouse_name,
                     "gender": "female",
-                    "generation": generation,
+                    "generation": gen_val,
+                    "source_generation": source_gen,
                     "_order": order,
                 })
                 order += 1
@@ -147,6 +159,9 @@ def parse_genealogy_text_enhanced(text: str) -> dict:
         for entry in entries:
             entry["_order"] = order
             order += 1
+            gen_val = canonical_override if canonical_override is not None else entry.get("generation", generation)
+            entry["generation"] = gen_val
+            entry["source_generation"] = source_gen
             persons.append({k: v for k, v in entry.items() if not k.startswith("_") or k == "_order"})
             role = entry.get("_role")
             name = entry["name"]
@@ -175,6 +190,11 @@ def parse_genealogy_text_enhanced(text: str) -> dict:
                             "status": "inferred", "confidence": 0.75,
                         })
 
+    persons = apply_generation_model_to_persons(
+        persons,
+        scheme=generation_scheme,
+        epoch_offset=generation_epoch_offset,
+    )
     return {"persons": persons, "relations": relations}
 
 
@@ -322,6 +342,8 @@ def auto_build_genealogy(
     relations: list[dict] | None = None,
     *,
     style: str = "su",
+    generation_scheme: str = "absolute",
+    generation_epoch_offset: int = 1,
 ) -> dict[str, Any]:
     """
     自动整理族谱：合并 AI/规则解析结果，推理缺失关系，生成树预览。
@@ -333,12 +355,20 @@ def auto_build_genealogy(
         persons = refine_persons_list(persons, text)
 
     if text and len(persons) < 2:
-        parsed = parse_genealogy_text_enhanced(text)
+        parsed = parse_genealogy_text_enhanced(
+            text,
+            generation_scheme=generation_scheme,
+            generation_epoch_offset=generation_epoch_offset,
+        )
         persons = parsed.get("persons", [])
         relations = parsed.get("relations", [])
 
     if text and not relations:
-        enhanced = parse_genealogy_text_enhanced(text)
+        enhanced = parse_genealogy_text_enhanced(
+            text,
+            generation_scheme=generation_scheme,
+            generation_epoch_offset=generation_epoch_offset,
+        )
         persons = dedupe_persons(persons + enhanced.get("persons", []))
         relations = relations + enhanced.get("relations", [])
 

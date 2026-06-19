@@ -4,6 +4,9 @@ import { api, API_TIMEOUT_LONG } from '../utils/api'
 import { compressImageFile } from '../utils/compressImage'
 import { uploadImageUrl } from '../utils/uploadImageUrl'
 import OcrTextWorkspace from './OcrTextWorkspace.vue'
+import GenealogyPageWorkbench from './GenealogyPageWorkbench.vue'
+import FamilyGenerationRules from './FamilyGenerationRules.vue'
+import SourceVersionPipelineBar from './SourceVersionPipelineBar.vue'
 import SourceTextPairView from './SourceTextPairView.vue'
 import GenealogyOrganizePanel from './GenealogyOrganizePanel.vue'
 import GenealogyReferenceView from './view/GenealogyReferenceView.vue'
@@ -51,12 +54,14 @@ const loadingVersions = ref(false)
 const saving = ref(false)
 const regeneratingOcr = ref(false)
 const regeneratingRel = ref(false)
+const pipelineRunning = ref(false)
 const versionRegenStatus = ref('')
 const aiParseReady = ref(true)
 const aiOcrReady = ref(true)
 const analyzing = ref(false)
 const aiOrganizing = ref(false)
 const sourceImageDataUrl = ref('')
+const imageUploadRef = ref<HTMLInputElement | null>(null)
 const suppressLivePreview = ref(false)
 const livePreviewLoading = ref(false)
 const livePreviewStatus = ref<'idle' | 'loading' | 'ready' | 'empty' | 'error'>('idle')
@@ -69,6 +74,8 @@ const ocrText = ref('')
 const relationText = ref('')
 const customText = ref('')
 const editingRelationKind = ref<'relation_desc' | 'custom'>('relation_desc')
+const generationScheme = ref<'absolute' | 'local_restart' | 'zibei_assist'>('absolute')
+const generationEpochOffset = ref(1)
 
 const v1 = computed(() => sourceVersions.value.find((v) => v.version_kind === 'ocr_raw') || null)
 const v2 = computed(() => sourceVersions.value.find((v) => v.version_kind === 'relation_desc') || null)
@@ -94,8 +101,13 @@ const activeRelationText = computed({
 const relationBaseline = computed(() => ocrText.value.trim() || relationText.value)
 
 const imagePath = computed(() => v1.value?.image_path || '')
+const imagePaths = computed(() => {
+  const paths = v1.value?.image_paths
+  if (Array.isArray(paths) && paths.length) return paths.filter(Boolean)
+  return imagePath.value ? [imagePath.value] : []
+})
 const imageUrl = computed(() => uploadImageUrl(imagePath.value, sourceImageDataUrl.value))
-const v1HasImage = computed(() => Boolean(uploadImageUrl(imagePath.value, sourceImageDataUrl.value)))
+const v1HasImage = computed(() => Boolean(imageUrl.value || imagePaths.value.length))
 
 const activeSourceVersionId = computed(() => {
   if (v3.value?.source_text?.trim()) return v3.value.id
@@ -121,11 +133,23 @@ function syncEditorsFromVersions() {
   else if (relationText.value.trim()) editingRelationKind.value = 'relation_desc'
 }
 
+async function loadFamilySettings() {
+  if (!props.familyId) return
+  try {
+    const fam = await api('GET', `/families/${props.familyId}`)
+    generationScheme.value = fam.generation_scheme || 'absolute'
+    generationEpochOffset.value = Math.max(1, Number(fam.generation_epoch_offset) || 1)
+  } catch {
+    /* ignore */
+  }
+}
+
 async function loadVersions() {
   if (!props.familyId) return
   loadingVersions.value = true
   suppressLivePreview.value = true
   try {
+    await loadFamilySettings()
     const res = await api('GET', `/families/${props.familyId}/source-versions`)
     sourceVersions.value = res.versions || []
     syncEditorsFromVersions()
@@ -242,6 +266,13 @@ async function onImageUpload(file: File) {
   }
 }
 
+function onImageUploadChange(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (file) void onImageUpload(file)
+  if (input) input.value = ''
+}
+
 async function imageUrlToBase64(url: string): Promise<string> {
   const res = await fetch(url)
   const blob = await res.blob()
@@ -256,7 +287,7 @@ async function imageUrlToBase64(url: string): Promise<string> {
   })
 }
 
-const isRegenerating = computed(() => regeneratingOcr.value || regeneratingRel.value)
+const isRegenerating = computed(() => regeneratingOcr.value || regeneratingRel.value || pipelineRunning.value)
 
 async function loadAiStatus() {
   try {
@@ -331,6 +362,31 @@ async function regenerateOcrFromImage() {
   }
 }
 
+async function regenerateRelationPage(page: number) {
+  if (!guardRegenerate('relation_desc')) return
+  regeneratingRel.value = true
+  versionRegenStatus.value = `正在 AI 整理第 ${page} 页关系描述…`
+  try {
+    const res = await api('POST', `/families/${props.familyId}/source-versions/regenerate-relation-desc`, {
+      ocr_text: ocrText.value,
+      page,
+    }, API_TIMEOUT_LONG)
+    if (!res.success) {
+      notify(res.message || res.detail || '本页生成失败', 'error')
+      return
+    }
+    relationText.value = res.relation_description || relationText.value
+    await loadVersions()
+    notify(`第 ${page} 页关系描述已更新`, 'success')
+    scheduleLivePreview()
+  } catch (e: unknown) {
+    notify((e as { message?: string })?.message || '本页生成失败', 'error')
+  } finally {
+    regeneratingRel.value = false
+    versionRegenStatus.value = ''
+  }
+}
+
 async function generateRelationDesc(target: 'relation_desc' | 'custom' = 'relation_desc') {
   const kind = target === 'custom' ? 'custom' : 'relation_desc'
   if (!guardRegenerate(kind)) return
@@ -375,6 +431,54 @@ async function generateRelationDesc(target: 'relation_desc' | 'custom' = 'relati
     regeneratingRel.value = false
     versionRegenStatus.value = ''
   }
+}
+
+async function runFullPipeline(opts?: { full?: boolean; fromOcr?: boolean }) {
+  if (!props.familyId || isRegenerating.value) return
+  if (!guardRegenerate('relation_desc')) return
+  pipelineRunning.value = true
+  versionRegenStatus.value = '正在递进生成：OCR → 关系描述 → 修正稿 → 族谱预览…（约 1–3 分钟）'
+  try {
+    const res = await api(
+      'POST',
+      `/families/${props.familyId}/source-versions/regenerate-pipeline`,
+      {
+        full: opts?.full !== false && !opts?.fromOcr,
+        from_ocr: Boolean(opts?.fromOcr),
+      },
+      API_TIMEOUT_LONG,
+    )
+    if (!res.success) {
+      notify(res.detail || res.message || res.error || '递进生成失败', 'error')
+      return
+    }
+    await loadVersions()
+    const preview = res.preview || {}
+    if (preview.persons?.length) {
+      livePreviewGraph.value = resolveViewData({
+        persons: preview.persons || [],
+        relations: preview.relations || [],
+        structuredText: res.digitize_text || activeRelationText.value,
+      })
+      livePreviewStatus.value = 'ready'
+      workspaceStep.value = 'preview'
+    }
+    notify(res.message || '递进生成完成，请核对预览后写入主谱', 'success')
+    scheduleLivePreview()
+  } catch (e: unknown) {
+    notify((e as { message?: string })?.message || '递进生成请求失败', 'error')
+  } finally {
+    pipelineRunning.value = false
+    versionRegenStatus.value = ''
+  }
+}
+
+async function onPipelineRegenerate(kind: 'ocr_raw' | 'relation_desc' | 'custom') {
+  await regenerateVersion(kind)
+}
+
+async function onPipelineRun(opts?: { full?: boolean; fromOcr?: boolean }) {
+  await runFullPipeline(opts)
 }
 
 async function regenerateVersion(kind: 'ocr_raw' | 'relation_desc' | 'custom') {
@@ -637,6 +741,8 @@ defineExpose({
   runLivePreview,
   regenerateOcr: regenerateOcrFromImage,
   regenerateRelation: () => generateRelationDesc('relation_desc'),
+  regenerateCustom: () => generateRelationDesc('custom'),
+  runPipeline: runFullPipeline,
   reloadFromServer,
 })
 
@@ -669,7 +775,7 @@ onMounted(() => {
       <div>
         <h3 class="organize-workspace-title">整理组谱</h3>
         <p class="hint organize-workspace-sub">
-          分步整理：扫描 OCR → 关系描述 → 可选修正 → 预览写入。每步只对比相邻版本。
+          主流程：扫描图 → OCR → 关系描述 → 预览写入。与「经典编辑」分工：这里负责版本一二三与 AI 递进；经典编辑负责看树、改成员。
         </p>
       </div>
       <div class="organize-workspace-steps" role="tablist">
@@ -735,6 +841,27 @@ onMounted(() => {
     <div v-if="loadingVersions" class="organize-workspace-loading">加载原文…</div>
 
     <div v-else class="organize-workspace-single">
+      <details class="organize-workspace-aux">
+        <summary>AI 重生 · 世次规则（可展开）</summary>
+        <div class="organize-workspace-aux-body">
+          <SourceVersionPipelineBar
+            :busy="isRegenerating"
+            :status-text="versionRegenStatus"
+            compact
+            @regenerate="onPipelineRegenerate"
+            @pipeline="onPipelineRun"
+          />
+          <FamilyGenerationRules
+            :family-id="familyId"
+            :generation-scheme="generationScheme"
+            :generation-epoch-offset="generationEpochOffset"
+            compact
+            @saved="(p) => { generationScheme = p.generation_scheme; generationEpochOffset = p.generation_epoch_offset }"
+            @notify="(msg, type) => notify(msg, type)"
+          />
+        </div>
+      </details>
+
       <!-- ① 版本一：原图 + OCR（仅相邻对照，不含其它版本） -->
       <section
         v-show="workspaceStep === 'v1'"
@@ -742,21 +869,22 @@ onMounted(() => {
       >
         <div class="organize-workspace-col-head">
           <strong>版本一 · 扫描图 ↔ OCR 原文</strong>
-          <span class="hint">{{ v1CharCount ? `${v1CharCount} 字` : '上传图片后 AI 识别或手贴文字' }}</span>
+          <span class="hint">{{ v1CharCount ? `${v1CharCount} 字` : '上传图片后 AI 识别或手贴文字' }} · 大图对照</span>
         </div>
         <div class="organize-workspace-col-body">
-          <OcrTextWorkspace
-            v-model="ocrText"
+          <GenealogyPageWorkbench
+            mode="v1"
+            image-primary
+            :ocr-text="ocrText"
             :image-path="imagePath"
+            :image-paths="imagePaths"
             :image-preview="sourceImageDataUrl"
-            :view-title="familyName || '族谱'"
-            :prefer-pair-edit="Boolean(imageUrl)"
-            minimal
-            compact
-            @upload-image="onImageUpload"
+            @update:ocr-text="ocrText = $event"
           />
         </div>
-        <div class="organize-workspace-col-actions">
+        <div class="organize-workspace-col-actions organize-workspace-col-actions--wrap">
+          <button type="button" class="btn-xs" @click="imageUploadRef?.click()">上传扫描图</button>
+          <input ref="imageUploadRef" type="file" accept="image/*" class="ocr-image-file-input" multiple @change="onImageUploadChange" />
           <button type="button" class="btn-xs btn-secondary" :disabled="isRegenerating" @click="regenerateOcrFromImage">
             {{ regeneratingOcr ? 'AI 识别中…' : 'AI 重生 OCR' }}
           </button>
@@ -776,17 +904,21 @@ onMounted(() => {
       >
         <div class="organize-workspace-col-head">
           <strong>版本二 · 关系描述</strong>
-          <span class="hint">左 OCR 原文 · 右关系描述（只对比 1↔2）</span>
+          <span class="hint">上图对照 · 下栏左 OCR 右关系描述</span>
           <span v-if="livePreviewLoading" class="organize-live-status organize-live-status--loading">预览更新中…</span>
           <span v-else-if="livePreviewStatus === 'ready'" class="organize-live-status organize-live-status--ready">预览已同步</span>
         </div>
         <div class="organize-workspace-col-body">
-          <SourceTextPairView
-            v-model="relationText"
-            :baseline-text="ocrText"
-            baseline-label="版本一 · OCR 原文（只读）"
-            right-label="版本二 · 关系描述"
-            right-placeholder="对照 OCR 整理人物关系…"
+          <GenealogyPageWorkbench
+            mode="v2"
+            image-primary
+            :ocr-text="ocrText"
+            :relation-text="relationText"
+            :image-path="imagePath"
+            :image-paths="imagePaths"
+            :image-preview="sourceImageDataUrl"
+            @update:relation-text="relationText = $event"
+            @regenerate-page="regenerateRelationPage"
           />
         </div>
         <div class="organize-workspace-col-actions organize-workspace-col-actions--wrap">
@@ -811,7 +943,7 @@ onMounted(() => {
       >
         <div class="organize-workspace-col-head">
           <strong>版本三 · 修正稿（可选）</strong>
-          <span class="hint">左版本二 · 右修正稿（只对比 2↔3）</span>
+          <span class="hint">左版本二关系描述 · 右修正稿（文字对照，只对比 2↔3）</span>
         </div>
         <div class="organize-workspace-col-body">
           <SourceTextPairView
@@ -820,6 +952,7 @@ onMounted(() => {
             baseline-label="版本二 · 关系描述（只读）"
             right-label="版本三 · 修正稿"
             right-placeholder="校对定稿，优先级高于版本二…"
+            :default-baseline-expanded="true"
           />
         </div>
         <div class="organize-workspace-col-actions organize-workspace-col-actions--wrap">

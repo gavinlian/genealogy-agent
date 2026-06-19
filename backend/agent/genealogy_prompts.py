@@ -32,27 +32,67 @@ RELATION_DESCRIBE_PROMPT_TEMPLATE = f"""你是族谱整理与数字化专家。�
 - 保留/补全生年、卒年、字、号、字辈；不确定处用[]标注；
 - 不得编造 OCR 原文中没有的人名；可补全关系连接词但不可虚构姓名。
 
+【完整性要求】
+- OCR 原文中的每一个人名（含配偶、女儿、侧室）都必须出现在输出中，不可遗漏；
+- 每一条可辨认的父子、母子、配偶关系都必须写进输出（行内「配/子/女/父/母」或分行「A 配 B」「A → B」）；
+- **若原文含「===== 第 N 页 =====」分隔符，必须按页输出，每页以相同页眉开头，页内按世代整理，不可漏页漏人**；
+- 同世兄弟须分行列出，不得合并省略。
+
 【禁止】
-- 不要 JSON、不要 markdown 代码块、不要「说明」「总结」类段落；
+- 不要 JSON、不要 markdown 代码块；
+- 不要任何前言、后语、分析说明、总结、温馨提示（只输出 RDL 关系描述正文）；
 - 不要把 {_FORBIDDEN} 单独当作人名（可作行首世代标记）。
 
-【格式规则（见 config/genealogy_pipeline.json）】
+【格式规则（RDL · 见 config/genealogy_pipeline.json）】
 {_EXTRA_RULES or "- 每行一人；父子配偶关系必须在文字中可读"}
 
 【推荐行格式】
-{{{{世代}}}} {{{{姓名}}}} [男|女] [字xxx] [生YYYY] [卒YYYY] [配配偶名] [子:名1,名2] [女:名1]
+{{{{世代}}}} {{{{姓名}}}} [男|女] [字xxx] [生YYYY] [卒YYYY] [父{{{{姓名}}}}] [母{{{{姓名}}}}] [配{{{{配偶}}}}] [子:名1,名2] [女:名1]
 
-【示例：版本二 关系描述稿输出】
-{_LINE_EXAMPLE}
-二世 张三 男 生1950 配王氏 子张甲
-二世 张四 男
+【多页输出示例】
+===== 第 1 页 =====
+一世 张公 男 字德明 生1920 配李氏 子张三,张四
 一世 李氏 女 配张公
-二世 王氏 女 配张三
+
+===== 第 2 页 =====
+二世 张三 男 父张公 母李氏 生1950 配王氏 子张甲
 
 【版本一 · OCR 原文】
 {{raw_text}}
 
-请直接输出【版本二 · 关系描述稿】全文："""
+请直接输出【版本二 · RDL 关系描述稿】正文（不要标题、不要解释）："""
+
+
+RELATION_DESCRIBE_PAGE_PROMPT_TEMPLATE = f"""你是族谱整理专家。下面仅是【版本一 OCR 原文 · 单页】。请只输出这一页对应的【版本二 RDL 关系描述】。
+
+要求：
+- 以「===== 第 {{page}} 页 =====」开头（页码与输入一致）；
+- 本页 OCR 中的人名与关系全部写出，一行一人，配/子/女/父/母写进行内；
+- 不要分析说明、不要 JSON、不要编造人名；
+- 格式同 RDL：{{{{世代}}}} {{{{姓名}}}} [男|女] [配{{{{配偶}}}}] [子:…] [父{{{{姓名}}}}] [母{{{{姓名}}}}]
+
+【本页 OCR 原文】
+{{raw_text}}
+
+请直接输出本页 RDL 正文："""
+
+# 版本三：在版本二基础上润色定稿（对照 OCR 查漏）
+CUSTOM_REFINE_PROMPT_TEMPLATE = """你是族谱数字化专家。用户已完成【版本二 · RDL 关系描述】。请生成【版本三 · 修正定稿】——供系统解析为完整族谱。
+
+【目标】
+- 以版本二为主体，对照版本一 OCR 查漏人名与关系（不可漏人、不可漏配/子/女）；
+- 保持 RDL 格式：一行一人，配/子/女/父/母写进行内；多页保留「===== 第 N 页 =====」；
+- 修正 OCR 错字导致的人名错误，但不编造原文没有的人；
+- 不要 JSON、不要分析说明、不要前言后语，只输出修正稿正文。
+
+【版本二 · 关系描述（待修正）】
+{relation_text}
+
+【版本一 · OCR 原文（对照参考）】
+{ocr_text}
+{extra}
+
+请直接输出【版本三 · 修正定稿】正文："""
 
 # 第二阶段：关系描述稿 → 数字化 JSON（人物 + 关系）
 DIGITIZE_PROMPT_TEMPLATE = f"""你是族谱数字化专家。这是族谱组谱的【第二步】：根据「关系描述稿」提取人物与关系，输出 JSON，供系统自动生成主谱。
@@ -71,13 +111,13 @@ DIGITIZE_PROMPT_TEMPLATE = f"""你是族谱数字化专家。这是族谱组谱�
 - 描述稿中暗示的每一条父子/配偶都必须出现在 relations 中。
 
 【JSON 格式】
-{{"persons": [
-  {{"name": "张公", "gender": "male", "birth_year": 1920, "death_year": null, "generation": 1, "generation_name": "德明"}},
-  {{"name": "张子", "gender": "male", "birth_year": null, "death_year": null, "generation": 2, "generation_name": ""}}
+{{{{"persons": [
+  {{{{"name": "张公", "gender": "male", "birth_year": 1920, "death_year": null, "generation": 1, "generation_name": "德明"}}}},
+  {{{{"name": "张子", "gender": "male", "birth_year": null, "death_year": null, "generation": 2, "generation_name": ""}}}}
 ], "relations": [
-  {{"from": "张公", "to": "张子", "type": "parent_child"}},
-  {{"from": "张子", "to": "李氏", "type": "spouse"}}
-]}}
+  {{{{"from": "张公", "to": "张子", "type": "parent_child"}}}},
+  {{{{"from": "张子", "to": "李氏", "type": "spouse"}}}}
+]}}}}
 
 【关系描述稿】
 {{relation_text}}
@@ -100,7 +140,16 @@ def build_relation_describe_prompt(
     *,
     context_notes: str = "",
     previous_draft: str = "",
+    page: int | None = None,
 ) -> str:
+    if page is not None and page > 0:
+        from source_pages import get_page_text
+
+        page_text = get_page_text(raw_text, page) or raw_text.strip()
+        return RELATION_DESCRIBE_PAGE_PROMPT_TEMPLATE.format(
+            page=page,
+            raw_text=page_text,
+        )
     extra = ""
     if (context_notes or "").strip():
         extra += f"\n\n【用户对话与整理上下文（请优先采纳其中明确修正意见）】\n{context_notes.strip()}"
@@ -117,6 +166,25 @@ def build_relation_describe_prompt(
             return body.replace(marker, extra + "\n\n" + marker)
         return body + extra
     return body
+
+
+def build_custom_refine_prompt(
+    relation_text: str,
+    ocr_text: str = "",
+    *,
+    context_notes: str = "",
+    previous_draft: str = "",
+) -> str:
+    extra = ""
+    if (context_notes or "").strip():
+        extra += f"\n\n【用户对话与修正意见（优先采纳）】\n{context_notes.strip()}"
+    if (previous_draft or "").strip() and previous_draft.strip() != (relation_text or "").strip():
+        extra += f"\n\n【上一版修正稿（可改进）】\n{previous_draft.strip()[:8000]}"
+    return CUSTOM_REFINE_PROMPT_TEMPLATE.format(
+        relation_text=(relation_text or "").strip() or "（暂无版本二）",
+        ocr_text=(ocr_text or "").strip() or "（无）",
+        extra=extra,
+    )
 
 
 def build_digitize_prompt(relation_text: str, raw_text: str = "") -> str:

@@ -81,13 +81,20 @@ def ui_prefill_person(person_id: str, draft: dict[str, Any], *, person_name: str
 
 
 def ui_organize_regenerate(target: str, *, synced: bool = False) -> dict[str, Any]:
-    """触发整理页 AI 重生：ocr_raw | relation_desc。"""
+    """触发整理页 AI 重生：ocr_raw | relation_desc | custom。"""
     kind = (target or "relation_desc").strip().lower()
     if kind in ("ocr", "v1", "version1", "ocr_raw"):
         kind = "ocr_raw"
+    elif kind in ("custom", "v3", "version3", "修正稿"):
+        kind = "custom"
     elif kind in ("relation", "v2", "version2", "relation_desc"):
         kind = "relation_desc"
     return {"type": "organize_regenerate", "target": kind, "synced": synced}
+
+
+def ui_organize_pipeline(*, full: bool = True, synced: bool = False) -> dict[str, Any]:
+    """触发整理页一键递进生成（版本链 + 预览）。"""
+    return {"type": "organize_pipeline", "full": full, "synced": synced}
 
 
 def ui_set_anchor(person_id: str, name: str = "") -> dict[str, Any]:

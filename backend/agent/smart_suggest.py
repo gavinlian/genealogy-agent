@@ -46,6 +46,8 @@ def build_smart_suggest_from_source(
     *,
     source_version: dict | None = None,
     style: str = "su",
+    generation_scheme: str = "absolute",
+    generation_epoch_offset: int = 1,
 ) -> dict[str, Any]:
     text = (source_text or "").strip()
     if not text:
@@ -61,7 +63,11 @@ def build_smart_suggest_from_source(
     if version_kind == VERSION_KIND_OCR_RAW:
         relation_text = build_local_relation_description(text) or text
 
-    enhanced = parse_genealogy_text_enhanced(relation_text)
+    enhanced = parse_genealogy_text_enhanced(
+        relation_text,
+        generation_scheme=generation_scheme,
+        generation_epoch_offset=generation_epoch_offset,
+    )
     parsed_persons = enhanced.get("persons") or []
     parsed_relations = enhanced.get("relations") or []
 

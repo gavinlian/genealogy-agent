@@ -121,8 +121,17 @@ def extract_json_content(content: str):
     return best_dict
 
 
-def parse_genealogy_text(text: str) -> dict:
+def parse_genealogy_text(
+    text: str,
+    *,
+    generation_scheme: str = "absolute",
+    generation_epoch_offset: int = 1,
+) -> dict:
     """从族谱纯文本提取人物与关系（规则引擎，委托增强解析）"""
     from .genealogy_builder import parse_genealogy_text_enhanced
 
-    return parse_genealogy_text_enhanced(text)
+    return parse_genealogy_text_enhanced(
+        text,
+        generation_scheme=generation_scheme,
+        generation_epoch_offset=generation_epoch_offset,
+    )

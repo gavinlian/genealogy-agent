@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { uploadImageUrl } from '../utils/uploadImageUrl'
-import SourceImageZoom from './SourceImageZoom.vue'
+import SourceImagePanel from './SourceImagePanel.vue'
 import {
   type NameAnnotation,
   NAME_DRAG_MIME,
@@ -30,6 +30,8 @@ const props = withDefaults(
     annotations?: NameAnnotation[]
     imagePreview?: string
     imagePath?: string
+    imagePreviews?: string[]
+    imagePaths?: string[]
     compact?: boolean
     relationLinkFrom?: string | null
     previewPersons?: any[]
@@ -45,6 +47,8 @@ const props = withDefaults(
     annotations: () => [],
     imagePreview: '',
     imagePath: '',
+    imagePreviews: () => [],
+    imagePaths: () => [],
     compact: false,
     relationLinkFrom: null,
     previewPersons: () => [],
@@ -72,20 +76,16 @@ const copyHint = ref('')
 const selectionHint = ref('')
 const viewMode = ref<SourceViewMode>('edit')
 const imageInputRef = ref<HTMLInputElement | null>(null)
+const imagePanelExpanded = ref(false)
 
 const imageSrc = computed(() => uploadImageUrl(props.imagePath, props.imagePreview))
 
-const showPairMode = computed(() => Boolean(imageSrc.value) || props.preferPairEdit)
+const hasAnyImage = computed(() => {
+  if (props.imagePaths?.length || props.imagePreviews?.length) return true
+  return Boolean(imageSrc.value)
+})
 
-watch(
-  () => [imageSrc.value, props.preferPairEdit] as const,
-  () => {
-    if (imageSrc.value && props.preferPairEdit && viewMode.value !== 'pair') {
-      viewMode.value = 'pair'
-    }
-  },
-  { immediate: true },
-)
+const showPairMode = computed(() => hasAnyImage.value || props.preferPairEdit)
 
 function onImageFileChange(e: Event) {
   const file = (e.target as HTMLInputElement).files?.[0]
@@ -333,14 +333,23 @@ function commitEditAnnotation() {
           <button type="button" class="btn-xs" @click="copyAllText">{{ copyHint || '复制全文' }}</button>
           <button type="button" class="btn-xs btn-primary" :disabled="!canMarkSelection" @click="markSelectionAsName">变为姓名标签</button>
           <button type="button" class="btn-xs" :disabled="aiLoading || !localText.trim()" @click="aiExtractNames">{{ aiLoading ? 'AI 识别中…' : 'AI 识别人名' }}</button>
-          <button type="button" class="btn-xs" @click="imageInputRef?.click()">{{ imageSrc ? '更换原图' : '上传原图' }}</button>
+          <button type="button" class="btn-xs" @click="imageInputRef?.click()">{{ hasAnyImage ? '更换原图' : '上传原图' }}</button>
           <input ref="imageInputRef" type="file" accept="image/*" class="ocr-image-file-input" @change="onImageFileChange" />
         </template>
         <span v-if="(viewMode === 'pair' || viewMode === 'edit') && selectionHint" class="ocr-text-hint">{{ selectionHint }}</span>
       </div>
 
-      <div v-if="viewMode === 'pair'" class="ocr-pair-split">
-        <SourceImageZoom :src="imageSrc" alt="版本一对照原图" />
+      <div v-if="viewMode === 'pair'" class="ocr-pair-split" :class="{ 'ocr-pair-split--image-open': imagePanelExpanded && hasAnyImage }">
+        <SourceImagePanel
+          v-if="hasAnyImage"
+          v-model:expanded="imagePanelExpanded"
+          :image-path="imagePath"
+          :image-paths="imagePaths"
+          :image-preview="imagePreview"
+          :image-previews="imagePreviews"
+          alt="版本一对照原图"
+          compact
+        />
         <div class="ocr-pair-editor">
           <p class="ocr-text-tip ocr-pair-tip">左侧原图与右侧<strong>版本一 OCR 原文</strong>一一对应校对；改字后请点「保存原文」。</p>
           <textarea
@@ -392,6 +401,16 @@ function commitEditAnnotation() {
       />
 
       <template v-else>
+        <SourceImagePanel
+          v-if="hasAnyImage"
+          v-model:expanded="imagePanelExpanded"
+          :image-path="imagePath"
+          :image-paths="imagePaths"
+          :image-preview="imagePreview"
+          :image-previews="imagePreviews"
+          alt="版本一对照原图"
+          compact
+        />
         <p class="ocr-text-tip">提示：可选 1–4 字 — 两字全名（姓+单字名如「王五」）、单字名、或复姓；双击或点「变为姓名标签」</p>
         <textarea
           ref="textareaRef"
